@@ -228,7 +228,12 @@ nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: 
 .table-scroll { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 6px 9px; border-bottom: 1px solid var(--border); vertical-align: top; }
-th { position: sticky; top: 57px; background: var(--surface-2); font-size: 12px; cursor: pointer; white-space: nowrap; z-index: 2; }
+/* 見出し行は「表のスクロール領域」に対して固定する。
+   .table-scroll は overflow-x: auto なので、そこがスクロール領域になる。
+   ここで top を 0 以外にすると、領域の上端からその分だけ見出しが
+   押し下げられ、最初の行に重なる（ページヘッダを避けるつもりの
+   top: 57px がまさにこれを起こしていた）。 */
+th { position: sticky; top: 0; background: var(--surface-2); font-size: 12px; cursor: pointer; white-space: nowrap; z-index: 2; }
 th:hover { color: var(--accent); }
 tbody tr:hover { background: var(--surface-2); }
 td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 12px; }
@@ -309,10 +314,7 @@ ul.tight li { margin: 2px 0; }
 .kv dt { color: var(--ink-2); }
 .kv dd { margin: 0; font-variant-numeric: tabular-nums; }
 
-/* パネル内の表はページ見出しに追従させない。
-   th の sticky（ページヘッダ用の top: 57px）が、独自スクロール領域である
-   パネルの中では見出し行を本文の上に浮かせて重なってしまう。 */
-.side-panel th { position: static; top: auto; }
+
 
 /* --- グラフ -------------------------------------------------------- */
 .graph-wrap { overflow-x: auto; padding: 4px 0 2px; }
@@ -349,3 +351,11 @@ ul.tight li { margin: 2px 0; }
   text-underline-offset: 2px; white-space: nowrap;
 }
 .pr-open:hover { color: var(--ink); }
+
+/* カード全体をクリック対象にする */
+.pr.clickable { cursor: pointer; }
+.pr.clickable:hover { background: var(--surface-2); border-color: var(--border-strong); }
+.pr.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pr .num { user-select: none; }
+.side-panel header .head-spacer { display: none; }
+.panel > h3 .head-spacer { flex: 1 1 auto; }

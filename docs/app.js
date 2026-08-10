@@ -116,13 +116,24 @@ function prCard(id, { step = null, note = null, reasons = null } = {}) {
       : null,
   );
 
+  // カード全体をクリック対象にする。番号だけを的にすると狙いにくい。
+  // 内側のボタン（他のPRへのリンク等）は stopPropagation でここに来ない。
   // バッジはひとかたまりにして折り返す。個別に並べると flex 行の中で
   // タイトルと幅を奪い合い、タイトルが潰れる。
   return el(
     "div",
-    { class: cls },
+    {
+      class: cls + " clickable",
+      role: "button",
+      tabindex: "0",
+      "aria-label": `${shortId(id)} ${pr.title} の詳細を開く`,
+      onclick: () => openPanel(id),
+      onkeydown: (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPanel(id); }
+      },
+    },
     step !== null ? el("span", { class: "step-no" }, step) : null,
-    el("span", { class: "num" }, prOpenButton(id)),
+    el("span", { class: "num" }, shortId(id)),
     body,
     el("span", { class: "pr-badges" }, ...prBadges(pr)),
     el("span", { class: "author" }, pr.author),
@@ -898,16 +909,10 @@ function pairsFor(id) {
     .sort((x, y) => y.level - x.level);
 }
 
-function renderPanel() {
-  const backdrop = $("#panel-backdrop");
-  const panel = $("#side-panel");
-  if (!state.pr || !PR.has(state.pr)) {
-    backdrop.removeAttribute("data-open");
-    panel.removeAttribute("data-open");
-    panel.setAttribute("aria-hidden", "true");
-    return;
-  }
-  const pr = PR.get(state.pr);
+/** PR 詳細の中身。**サイドパネルと単一ページで共有する**（表示場所が
+ *  変わっても同じ情報・同じ並びになるようにするため）。 */
+function prDetail(id) {
+  const pr = PR.get(id);
   const o = DATA.orders[state.line] || {};
   const preset = (o.presets || {})[state.preset] || (o.presets || {}).balanced;
   const rank = preset ? preset.order.indexOf(pr.id) : -1;
@@ -915,33 +920,72 @@ function renderPanel() {
   const cluster = (o.clusters || []).find((c) => c.members.includes(pr.id));
   const related = pairsFor(pr.id);
 
-  const body = el("div", { class: "body" });
+  const out = [];
 
-  // 位置づけ
   const stats = el("div", { class: "stat-row" });
   if (rank >= 0) stats.append(el("div", {}, el("strong", {}, rank + 1), `推奨順（${preset.order.length}件中）`));
-  if (metrics) {
-    stats.append(el("div", {}, el("strong", {}, metrics.blocks), "スタックでブロック"));
-    stats.append(el("div", {}, el("strong", {}, related.length), "干渉する相手"));
-  }
+  if (metrics) stats.append(el("div", {}, el("strong", {}, metrics.blocks), "スタックでブロック"));
+  stats.append(el("div", {}, el("strong", {}, related.length), "干渉する相手"));
   stats.append(el("div", {}, el("strong", {}, `+${pr.additions}/-${pr.deletions}`), `${pr.changed_files_count} ファイル`));
-  body.append(stats);
+  out.push(stats);
 
-  // 属性
+  // 干渉（干渉一覧ページと同じ形式）。この PR を見に来る一番の理由なので先頭に置く。
+  if (related.length) {
+    const tb = el("tbody");
+    for (const r of related) {
+      const other = PR.get(r.other);
+      tb.append(el("tr", {},
+        el("td", {}, levelChip(r.level)),
+        el("td", {}, prOpenButton(r.other),
+          el("div", { class: "small muted" }, other ? other.title.slice(0, 44) : ""),
+          other ? el("div", { class: "small muted" }, other.author) : null),
+        el("td", { class: "small" },
+          (r.conflict_files || []).map((f) =>
+            el("div", {}, el("code", {}, f.path),
+              f.structural ? el("span", { class: "badge warn" }, "構造") : null)),
+          !r.conflict_files?.length && r.overlap_files
+            ? el("div", { class: "muted" }, el("code", {}, r.overlap_files.slice(0, 3).join(", ")))
+            : null),
+        el("td", { class: "small" },
+          (r.warnings || []).map((w) => el("div", {},
+            el("span", { class: "badge warn" }, w.kind === "same_function_region" ? "同一関数" : "依存/設定"),
+            " ", el("code", {}, (w.symbols || [w.path]).join(", ")))))));
+    }
+    out.push(el("section", {},
+      el("h4", {}, `干渉する PR（${related.length}件）`),
+      el("div", { class: "table-scroll" },
+        el("table", {},
+          el("thead", {}, el("tr", {},
+            el("th", {}, "レベル"), el("th", {}, "相手"), el("th", {}, "ファイル"), el("th", {}, "警告"))),
+          tb))));
+  } else {
+    out.push(el("section", {}, el("h4", {}, "干渉する PR"),
+      el("p", { class: "hint" }, "この統合ラインの中では、どの PR とも干渉していません。")));
+  }
+
+  // ベース衝突
+  if (pr.base_conflict && pr.base_conflict_files) {
+    out.push(el("section", {},
+      el("h4", {}, "ベースとの衝突（まず rebase が必要）"),
+      el("ul", { class: "tight small" },
+        ...pr.base_conflict_files.map((f) =>
+          el("li", {}, el("code", {}, f.path), " ",
+            el("span", { class: "muted" }, `ステージ ${f.stages.join(",")}`))))));
+  }
+
   const kv = el("dl", { class: "kv" });
   const put = (k, v) => { kv.append(el("dt", {}, k), el("dd", {}, v)); };
   put("著者", pr.author);
   put("レビュー", pr.review_decision);
-  put("ブランチ", el("code", {}, `${pr.head.repo === DATA.source.repo ? "" : pr.head.repo.split("/")[0] + ":"}${pr.head.branch}`));
+  put("ブランチ", el("code", {},
+    `${pr.head.repo === DATA.source.repo ? "" : pr.head.repo.split("/")[0] + ":"}${pr.head.branch}`));
   put("マージ先", el("code", {}, pr.base.branch));
-  if (cluster) {
-    put("クラスタ", el("button", {
-      class: "cluster-link",
-      onclick: () => { closePanel(); state.view = "cluster"; state.cluster = cluster.id; render(); },
-    }, `${cluster.id}（${cluster.members.length}件）`));
-  } else {
-    put("クラスタ", el("span", { class: "muted" }, "独立（並行に流せる）"));
-  }
+  put("クラスタ", cluster
+    ? el("button", {
+        class: "cluster-link",
+        onclick: () => { closePanel(); state.view = "cluster"; state.cluster = cluster.id; render(); },
+      }, `${cluster.id}（${cluster.members.length}件）`)
+    : el("span", { class: "muted" }, "独立（並行に流せる）"));
   if (pr.stack.depth > 0) {
     put("スタック", el("span", {}, ...pr.stack.ancestors.map((a, i) =>
       el("span", {}, i ? " → " : "", prOpenButton(a))), " → ", el("strong", {}, shortId(pr.id))));
@@ -952,67 +996,76 @@ function renderPanel() {
   if (pr.duplicate_of) {
     put("重複", el("span", {}, ...pr.duplicate_of.map((d) => prOpenButton(d)), " と同一コミット"));
   }
-  body.append(el("section", {}, el("h4", {}, "この PR について"), kv));
+  out.push(el("section", {}, el("h4", {}, "この PR について"), kv));
 
-  // ベース衝突
-  if (pr.base_conflict && pr.base_conflict_files) {
-    body.append(el("section", {},
-      el("h4", {}, "ベースとの衝突（まず rebase が必要）"),
-      el("ul", { class: "tight small" },
-        ...pr.base_conflict_files.map((f) =>
-          el("li", {}, el("code", {}, f.path), " ", el("span", { class: "muted" }, `ステージ ${f.stages.join(",")}`))))));
-  }
-
-  // 干渉相手
-  if (related.length) {
-    const rows = el("tbody");
-    for (const r of related) {
-      const other = PR.get(r.other);
-      rows.append(el("tr", {},
-        el("td", {}, levelChip(r.level)),
-        el("td", {}, prOpenButton(r.other), el("div", { class: "small muted" }, other ? other.title.slice(0, 40) : "")),
-        el("td", { class: "small" },
-          (r.conflict_files || []).slice(0, 3).map((f) => el("div", {}, el("code", {}, f.path.split("/").pop()))),
-          (r.warnings || []).map((w) => el("div", { class: "small" },
-            el("span", { class: "badge warn" }, w.kind === "same_function_region" ? "同一関数" : "依存/設定"),
-            " ", el("code", {}, (w.symbols || [w.path]).join(", ")))))));
-    }
-    body.append(el("section", {},
-      el("h4", {}, `干渉する PR（${related.length}件)`),
-      el("div", { class: "table-scroll" },
-        el("table", {},
-          el("thead", {}, el("tr", {}, el("th", {}, "レベル"), el("th", {}, "相手"), el("th", {}, "内容"))),
-          rows))));
-  }
-
-  // 変更ファイル
   if (pr.changed_files && pr.changed_files.length) {
-    body.append(el("section", {},
+    out.push(el("section", {},
       el("h4", {}, `変更ファイル（${pr.changed_files.length}件）`),
       el("details", {},
         el("summary", { class: "muted" }, "一覧を開く"),
-        el("ul", { class: "tight small mono" },
-          ...pr.changed_files.map((f) => el("li", {}, f))))));
+        el("ul", { class: "tight small mono" }, ...pr.changed_files.map((f) => el("li", {}, f))))));
   }
+  return out;
+}
 
+function renderPanel() {
+  const backdrop = $("#panel-backdrop");
+  const panel = $("#side-panel");
+  // 単一ページで見ているときはパネルを重ねない
+  const show = state.pr && PR.has(state.pr) && state.view !== "pr";
+  if (!show) {
+    backdrop.removeAttribute("data-open");
+    panel.removeAttribute("data-open");
+    panel.setAttribute("aria-hidden", "true");
+    return;
+  }
+  const pr = PR.get(state.pr);
   panel.replaceChildren(
     el("header", {},
       el("div", { class: "grow" },
         el("div", { class: "mono small muted" }, pr.id),
         el("h2", {}, pr.title),
-        el("div", {}, ...prBadges(pr))),
-      el("a", { class: "btn", href: pr.url, target: "_blank", rel: "noopener", title: "GitHub で開く" }, "GitHub ↗"),
+        el("div", { class: "pr-badges" }, ...prBadges(pr))),
+      el("button", {
+        title: "このPRだけのページを開く",
+        onclick: () => { state.view = "pr"; render(); },
+      }, "⤢ ページで開く"),
+      el("a", { class: "btn", href: pr.url, target: "_blank", rel: "noopener" }, "GitHub ↗"),
       el("button", { onclick: closePanel, title: "閉じる（Esc）", "aria-label": "閉じる" }, "✕")),
-    body,
+    el("div", { class: "body" }, ...prDetail(state.pr)),
   );
   panel.setAttribute("data-open", "");
   panel.setAttribute("aria-hidden", "false");
   backdrop.setAttribute("data-open", "");
 }
 
+// --- ビュー: PR 単一ページ ---------------------------------------------
+
+function viewPr() {
+  const root = el("div");
+  if (!state.pr || !PR.has(state.pr)) {
+    root.append(el("div", { class: "empty" }, "PR を選んでください。"));
+    return root;
+  }
+  const pr = PR.get(state.pr);
+  root.append(el("p", { class: "crumb" },
+    el("button", { onclick: () => { state.view = "board"; render(); } }, "← 推奨マージ順"),
+    "　/　", el("span", { class: "mono" }, pr.id)));
+
+  root.append(el("div", { class: "panel" },
+    el("h3", {},
+      el("span", { class: "mono muted" }, pr.id), "　",
+      el("strong", {}, pr.title),
+      el("span", { class: "pr-badges" }, ...prBadges(pr)),
+      el("span", { class: "head-spacer" }),
+      el("a", { class: "btn", href: pr.url, target: "_blank", rel: "noopener" }, "GitHub ↗")),
+    el("div", { class: "panel-body" }, ...prDetail(state.pr))));
+  return root;
+}
+
 // --- 描画 --------------------------------------------------------------
 
-const VIEWS = { board: viewBoard, cluster: viewCluster, conflicts: viewConflicts, stacks: viewStacks, mine: viewMine, table: viewTable };
+const VIEWS = { board: viewBoard, cluster: viewCluster, pr: viewPr, conflicts: viewConflicts, stacks: viewStacks, mine: viewMine, table: viewTable };
 
 function render() {
   writeHash();
