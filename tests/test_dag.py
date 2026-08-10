@@ -206,3 +206,37 @@ class TestIncomparableAcrossLines:
             LINES,
         )
         assert g.resolutions[f"{UP}#1"].root_node != g.resolutions[f"{UP}#2"].root_node
+
+
+class TestForkLineAliases:
+    """フォークの同名ブランチを同じ統合ラインとして扱う。
+
+    フォーク内で完結する PR（base がフォークの main）は、ノードキーに
+    リポジトリが入るため `fork:main` という別ノードになる。別名を
+    張らないと「指定されていない統合ライン」と判定され、まるごと
+    解析から除外されてしまう。
+    """
+
+    def aliased_lines(self) -> dict:
+        return {**LINES, dag.node_key(FK, "main"): "main"}
+
+    def test_fork_internal_pr_resolves_to_upstream_line(self):
+        prs = [pr(FK, 7, FK, "feat/x", FK, "main")]
+        g = dag.build(prs, self.aliased_lines())
+        assert g.line_of(f"{FK}#7") == "main"
+        assert g.resolutions[f"{FK}#7"].resolution == "resolved"
+
+    def test_without_alias_it_is_unresolved(self):
+        """別名を張らなければ解決できない（回帰の対比）。"""
+        prs = [pr(FK, 7, FK, "feat/x", FK, "main")]
+        g = dag.build(prs, LINES)
+        assert g.line_of(f"{FK}#7") is None
+
+    def test_fork_stack_on_fork_main_keeps_depth(self):
+        prs = [
+            pr(FK, 7, FK, "feat/x", FK, "main"),
+            pr(FK, 8, FK, "feat/y", FK, "feat/x"),
+        ]
+        g = dag.build(prs, self.aliased_lines())
+        assert g.line_of(f"{FK}#8") == "main"
+        assert g.resolutions[f"{FK}#8"].ancestors == (f"{FK}#7",)

@@ -80,9 +80,36 @@ def run(
     tmp = Path(tempfile.mkdtemp(prefix="pr-conflict-")) if workdir is None else Path(workdir)
     cleanup = workdir is None
     try:
-        repo, _ = prepare_repo(target, forks, tmp, verbose=verbose)
+        repo, namespaces = prepare_repo(target, forks, tmp, verbose=verbose)
 
+        def branch_ref(node: str) -> str | None:
+            """ノードの示すブランチに対応するローカル ref を返す。
+
+            フォークのブランチは `origin/` ではなく、そのフォーク用の
+            名前空間に取り込んである。ここを間違えると、フォーク内の
+            枝に載った PR がすべて「解決できない」になる。
+            """
+            node_repo, branch = node.split(":", 1)
+            if node_repo == target:
+                ref = f"origin/{branch}"
+            elif node_repo in namespaces:
+                ref = f"{namespaces[node_repo]}-br/{branch}"
+            else:
+                return None
+            return ref if repo.exists(ref) else None
+
+        # 統合ラインのノード。対象リポジトリだけでなく、**フォーク側の
+        # 同名ブランチも同じラインの別名として登録する**。
+        #
+        # フォーク内で完結する PR（base がフォークの master など）は、
+        # ノードキーにリポジトリが入る都合で `fork:master` という別ノードに
+        # なる。別名を張らないと「指定されていない統合ライン」と判定されて
+        # まるごと除外される。実際に問うているのは「これを上流へ入れたら
+        # どうなるか」なので、上流のラインへ着地させるのが正しい。
         lines = {dag.node_key(target, name): name for name in line_names}
+        for fork in forks:
+            for name in line_names:
+                lines.setdefault(dag.node_key(fork, name), name)
         line_oids = {name: repo.rev_parse(f"origin/{name}") for name in line_names}
 
         # そのブランチを base にしているオープン PR の数。
@@ -110,9 +137,8 @@ def run(
                 unlisted_lines[node] = base_counts[node]
                 return None
 
-            branch = node.split(":", 1)[1]
-            ref = f"origin/{branch}"
-            if not repo.exists(ref):
+            ref = branch_ref(node)
+            if ref is None:
                 return None
             best, best_dist = None, None
             for name, oid in line_oids.items():
