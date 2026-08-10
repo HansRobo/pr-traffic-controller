@@ -19,12 +19,14 @@ L0 と L1 は merge-tree では区別できない（クリーンはクリーン�
 from __future__ import annotations
 
 import itertools
+from dataclasses import replace
 from typing import TYPE_CHECKING, Iterable
 
 from . import codekind, semantic
 from .model import (
     Candidate,
     ConflictFile,
+    FileInterference,
     Level,
     PairResult,
     Relation,
@@ -57,7 +59,14 @@ def conflict_files_from(
         if repo is not None:
             body = repo.show(result.tree_oid, path)
             if body:
-                hunks = parse_conflict_hunks(body)
+                # チャンクごとに「コメントだけか」を判定して持たせる。
+                # ファイル単位に丸めると、1 箇所だけ実コードという状況が
+                # 見えなくなる。
+                hunks = tuple(
+                    replace(h, comment_only=codekind.is_comment_only(
+                        path, list(h.ours) + list(h.theirs)))
+                    for h in parse_conflict_hunks(body)
+                )
         out.append(
             ConflictFile(
                 path=path,
@@ -70,18 +79,61 @@ def conflict_files_from(
     return tuple(out)
 
 
-def classify(result: MergeTreeResult) -> Level:
-    """衝突した merge-tree 結果を L2 / L3 に分類する。
+def classify_file(cf: ConflictFile) -> Level:
+    """衝突した 1 ファイルを L2 / L3 に分類する。
 
     構造衝突の判定は **ステージ番号の集合** で行う。内容衝突は
     base(1) と双方(2,3) が揃うので、欠けていれば追加・削除・改名が
     絡んでいる。型フィールドの文字列一致に頼ってはいけない ——
     add/add 衝突の型は ``CONFLICT (contents)`` であり、
     ``add/add`` という文字列は人間向けの本文にしか現れない。
+
+    ステージを一切生成しない衝突（directory/file 等）は型で拾う。
     """
-    if result.clean:
-        raise ValueError("クリーンな結果は L2/L3 に分類できない")
-    return Level.L3 if result.is_structural() else Level.L2
+    if cf.stages:
+        return Level.L2 if cf.stages == frozenset({1, 2, 3}) else Level.L3
+    return Level.L2 if cf.types == ("CONFLICT (contents)",) else Level.L3
+
+
+def build_file_levels(
+    overlap: frozenset[str],
+    conflicts: tuple[ConflictFile, ...],
+    warnings: tuple,
+) -> tuple[FileInterference, ...]:
+    """重なったファイルそれぞれに等級を付ける。
+
+    衝突していないファイルは L1（同じファイルを触ったがマージできる）。
+    衝突しているファイルは、そのファイル自身のステージから L2/L3 を決める。
+    """
+    by_path = {c.path: c for c in conflicts}
+    warn_by_path: dict[str, list] = {}
+    for w in warnings:
+        warn_by_path.setdefault(w.path, []).append(w)
+
+    out: list[FileInterference] = []
+    for path in sorted(overlap | set(by_path)):
+        cf = by_path.get(path)
+        if cf is None:
+            out.append(
+                FileInterference(
+                    path=path,
+                    level=Level.L1,
+                    warnings=tuple(warn_by_path.get(path, ())),
+                )
+            )
+        else:
+            out.append(
+                FileInterference(
+                    path=path,
+                    level=classify_file(cf),
+                    stages=cf.stages,
+                    types=cf.types,
+                    hunks=cf.hunks,
+                    comment_only=cf.comment_only,
+                    warnings=tuple(warn_by_path.get(path, ())),
+                )
+            )
+    return tuple(out)
 
 
 def analyze_pair(
@@ -131,22 +183,16 @@ def analyze_pair(
             config_patterns=config_patterns,
         )
 
-    if result.clean:
-        return PairResult(
-            a=a.id,
-            b=b.id,
-            relation=Relation.COMPUTED,
-            level=Level.L1,
-            overlap_files=overlap,
-            warnings=warnings,
-        )
-
+    conflicts = () if result.clean else conflict_files_from(result, repo)
+    files = build_file_levels(overlap, conflicts, warnings)
     return PairResult(
         a=a.id,
         b=b.id,
         relation=Relation.COMPUTED,
-        level=classify(result),
-        conflict_files=conflict_files_from(result, repo),
+        # ペアの等級は、ファイルごとの等級の最大。丸めた値は一覧の並べ替えや
+        # 順序付けに使うだけで、内訳は files に残る。
+        level=max((f.level for f in files), default=Level.L1),
+        files=files,
         overlap_files=overlap,
         warnings=warnings,
     )

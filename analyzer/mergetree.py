@@ -179,6 +179,12 @@ class ConflictHunk:
     theirs: tuple[str, ...]
     ours_truncated: bool = False
     theirs_truncated: bool = False
+    comment_only: bool = False
+    """この箇所がコメント・文書だけか。
+
+    ファイル単位でまとめてしまうと、「3 箇所のうち 2 箇所は
+    コメントで、1 箇所だけ実コード」という状況が見えなくなる。
+    """
 
 
 def parse_conflict_hunks(text: str) -> tuple[ConflictHunk, ...]:

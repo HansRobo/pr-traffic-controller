@@ -150,7 +150,10 @@ def classify_hunks(path: str, hunks) -> bool:
     if is_doc_file(path):
         return True
     for h in hunks:
-        both = list(h.ours) + list(h.theirs)
-        if not is_comment_only(path, both):
+        # チャンク側で判定済みならそれを使う（二重に計算しない）
+        decided = getattr(h, "comment_only", None)
+        if decided is None:
+            decided = is_comment_only(path, list(h.ours) + list(h.theirs))
+        if not decided:
             return False
     return True

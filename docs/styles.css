@@ -562,3 +562,6 @@ tr.dir-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2p
   background: var(--ok-bg); font-size: 12px;
 }
 .dir-chip button { padding: 0 4px; border: none; background: none; font-size: 12px; }
+
+/* ファイルごとの等級 */
+.file-level { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; padding: 1px 0; }

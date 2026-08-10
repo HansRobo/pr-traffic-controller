@@ -640,24 +640,16 @@ function viewCluster() {
   if (pairs.length) {
     const tb = el("tbody");
     for (const x of pairs.sort((m, n) => n.level - m.level)) {
-      const xHunks = (x.conflict_files || []).filter((f) => f.hunks && f.hunks.length);
+      const xHunks = pairFiles(x).filter((f) => f.hunks && f.hunks.length);
       const xActions = el("td", {});
       const xRow = el("tr", {},
         el("td", {}, levelChip(x.level), x.comment_only ? commentOnlyBadge() : null),
         el("td", {}, prOpenButton(x.a)),
         el("td", {}, prOpenButton(x.b)),
-        el("td", { class: "small" },
-          (x.conflict_files || []).map((f) => el("div", {}, fileLink(f.path))),
-          !x.conflict_files?.length && x.overlap_files
-            ? el("div", { class: "muted" }, el("code", {}, x.overlap_files.slice(0, 2).join(", ")))
-            : null),
-        el("td", { class: "small" },
-          (x.warnings || []).map((w) => el("div", {},
-            el("span", { class: "badge warn" }, w.kind === "same_function_region" ? "同一関数" : "依存/設定"),
-            " ", el("code", {}, (w.symbols || [w.path]).join(", "))))),
+        el("td", { class: "small" }, fileLevelRows(x)),
         xActions);
       if (xHunks.length) {
-        xActions.append(expandableRow(tb, xRow, 6, `衝突箇所（${xHunks.length}）`, () =>
+        xActions.append(expandableRow(tb, xRow, 5, `衝突箇所（${xHunks.length}）`, () =>
           el("div", {}, ...xHunks.map((f) => conflictHunks(f, x.a, x.b)))));
       } else {
         tb.append(xRow);
@@ -668,8 +660,8 @@ function viewCluster() {
       el("div", { class: "table-scroll" },
         el("table", {},
           el("thead", {}, el("tr", {},
-            el("th", {}, "レベル"), el("th", {}, "PR A"), el("th", {}, "PR B"),
-            el("th", {}, "ファイル"), el("th", {}, "警告"), el("th", {}, ""))),
+            el("th", {}, "最大"), el("th", {}, "PR A"), el("th", {}, "PR B"),
+            el("th", {}, "ファイルごとの等級と警告"), el("th", {}, ""))),
           tb))));
   }
 
@@ -764,9 +756,10 @@ function buildFileIndex() {
   for (const pair of iv.pairs) {
     if (pair.level === undefined) continue;
     if (isHidden(pair.a) || isHidden(pair.b)) continue;
-    for (const cf of pair.conflict_files || []) {
+    for (const cf of pairFiles(pair)) {
+      if ((cf.level || 0) < 2) continue;   // 重なっただけの行は衝突ではない
       get(cf.path).conflicts.push({
-        a: pair.a, b: pair.b, level: pair.level, structural: cf.structural,
+        a: pair.a, b: pair.b, level: cf.level, structural: cf.structural,
         comment_only: cf.comment_only, file: cf,
       });
     }
@@ -1042,36 +1035,28 @@ function viewConflicts() {
     .sort((a, b) =>
       (!!a.comment_only - !!b.comment_only)
       || b.level - a.level
-      || (b.conflict_files || []).length - (a.conflict_files || []).length);
+      || pairFiles(b).filter((f) => f.level >= 2).length
+         - pairFiles(a).filter((f) => f.level >= 2).length);
 
   if (!rows.length) return root.append(el("div", { class: "empty" }, "該当なし")), root;
 
   const t = el("table");
   t.append(el("thead", {}, el("tr", {},
-    el("th", {}, "レベル"), el("th", {}, "PR A"), el("th", {}, "PR B"),
-    el("th", {}, "衝突/重複ファイル"), el("th", {}, "警告"), el("th", {}, ""))));
+    el("th", {}, "最大"), el("th", {}, "PR A"), el("th", {}, "PR B"),
+    el("th", {}, "ファイルごとの等級と警告"), el("th", {}, ""))));
   const tb = el("tbody");
   for (const p of rows) {
-    const files = p.conflict_files && p.conflict_files.length
-      ? p.conflict_files.map((f) =>
-          el("div", {}, fileLink(f.path),
-            f.structural ? el("span", { class: "badge warn", title: `ステージ ${f.stages.join(",")}` }, "構造") : null))
-      : (p.overlap_files || []).slice(0, 4).map((f) => el("div", { class: "muted" }, fileLink(f)));
-    const warns = (p.warnings || []).map((w) =>
-      el("div", { class: "small" },
-        el("span", { class: "badge warn" }, w.kind === "same_function_region" ? "同一関数" : "依存/設定"),
-        " ", w.symbols ? el("code", {}, w.symbols.join(", ")) : el("code", {}, w.path)));
-    const withHunks = (p.conflict_files || []).filter((f) => f.hunks && f.hunks.length);
+    const files = fileLevelRows(p);
+    const withHunks = pairFiles(p).filter((f) => f.hunks && f.hunks.length);
     const actions = el("td", {});
     const row = el("tr", {},
       el("td", {}, levelChip(p.level), p.comment_only ? commentOnlyBadge() : null),
       el("td", {}, prLink(p.a)),
       el("td", {}, prLink(p.b)),
       el("td", { class: "small" }, files),
-      el("td", {}, warns),
       actions);
     if (withHunks.length) {
-      actions.append(expandableRow(tb, row, 6, `衝突箇所（${withHunks.length}ファイル）`, () =>
+      actions.append(expandableRow(tb, row, 5, `衝突箇所（${withHunks.length}ファイル）`, () =>
         el("div", {}, ...withHunks.map((f) => conflictHunks(f, p.a, p.b)))));
     } else {
       tb.append(row);
@@ -1538,6 +1523,41 @@ function expandableRow(tbody, row, colCount, label, buildContent) {
   return btn;
 }
 
+
+/** ペアの中のファイル一覧。新しい `files`（ファイルごとの等級つき）を使い、
+ *  無ければ古い `conflict_files` から組み立てる。
+ *
+ *  解析結果はキャッシュから順に更新されるので、新しいビューアが古い形式の
+ *  データを読むことがある。壊れるより、等級が粗いまま出す方がよい。 */
+function pairFiles(p) {
+  if (p.files) return p.files;
+  const out = (p.conflict_files || []).map((f) => ({
+    ...f, level: f.structural ? 3 : 2,
+  }));
+  const seen = new Set(out.map((f) => f.path));
+  for (const path of p.overlap_files || []) {
+    if (!seen.has(path)) out.push({ path, level: 1 });
+  }
+  return out;
+}
+
+/** ファイルごとの等級を並べた行。ペアの等級ひとつでは、
+ *  「16 ファイルが衝突し 19 ファイルは重なっただけ」が読み取れない。 */
+function fileLevelRows(p) {
+  const files = pairFiles(p).slice().sort((a, b) => b.level - a.level || a.path.localeCompare(b.path));
+  return files.map((f) =>
+    el("div", { class: "file-level" },
+      levelChip(f.level),
+      f.structural ? el("span", { class: "badge warn" }, "構造") : null,
+      f.comment_only ? commentOnlyBadge() : null,
+      fileLink(f.path),
+      (f.warnings || []).map((w) =>
+        el("span", { class: "badge warn", title: w.detail },
+          w.kind === "same_function_region"
+            ? "同一関数 " + ((w.symbols || []).join(", ") || "")
+            : "依存/設定"))));
+}
+
 /** 2 つの行列の最長共通部分列。衝突ハンクは高々数十行なので素朴な DP でよい。 */
 function lineDiff(a, b) {
   const n = a.length, m = b.length;
@@ -1592,7 +1612,8 @@ function conflictHunks(file, aId, bId) {
       el("div", { class: "hunk-loc" },
         el("code", {}, `${file.path}:${h.line}`),
         el("span", { class: "small muted" },
-          `　${(h.a || []).length} 行 ↔ ${(h.b || []).length} 行`)),
+          `　${(h.a || []).length} 行 ↔ ${(h.b || []).length} 行`),
+        h.comment_only ? commentOnlyBadge() : null),
       pre));
   }
   return box;
@@ -1654,27 +1675,17 @@ function prDetail(id) {
     const tb = el("tbody");
     for (const r of related) {
       const other = PR.get(r.other);
-      const rHunks = (r.conflict_files || []).filter((f) => f.hunks && f.hunks.length);
+      const rHunks = pairFiles(r).filter((f) => f.hunks && f.hunks.length);
       const rActions = el("td", {});
       const rRow = el("tr", {},
         el("td", {}, levelChip(r.level), r.comment_only ? commentOnlyBadge() : null),
         el("td", {}, prOpenButton(r.other),
           el("div", { class: "small muted" }, other ? other.title.slice(0, 44) : ""),
           other ? el("div", {}, authorChip(other.author, other.author_avatar_url)) : null),
-        el("td", { class: "small" },
-          (r.conflict_files || []).map((f) =>
-            el("div", {}, fileLink(f.path),
-              f.structural ? el("span", { class: "badge warn" }, "構造") : null)),
-          !r.conflict_files?.length && r.overlap_files
-            ? el("div", { class: "muted" }, el("code", {}, r.overlap_files.slice(0, 3).join(", ")))
-            : null),
-        el("td", { class: "small" },
-          (r.warnings || []).map((w) => el("div", {},
-            el("span", { class: "badge warn" }, w.kind === "same_function_region" ? "同一関数" : "依存/設定"),
-            " ", el("code", {}, (w.symbols || [w.path]).join(", "))))),
+        el("td", { class: "small" }, fileLevelRows(r)),
         rActions);
       if (rHunks.length) {
-        rActions.append(expandableRow(tb, rRow, 5, `衝突箇所（${rHunks.length}）`, () =>
+        rActions.append(expandableRow(tb, rRow, 4, `衝突箇所（${rHunks.length}）`, () =>
           el("div", {}, ...rHunks.map((f) => conflictHunks(f, r.a, r.b)))));
       } else {
         tb.append(rRow);
@@ -1685,8 +1696,8 @@ function prDetail(id) {
       el("div", { class: "table-scroll" },
         el("table", {},
           el("thead", {}, el("tr", {},
-            el("th", {}, "レベル"), el("th", {}, "相手"), el("th", {}, "ファイル"),
-            el("th", {}, "警告"), el("th", {}, ""))),
+            el("th", {}, "最大"), el("th", {}, "相手"),
+            el("th", {}, "ファイルごとの等級と警告"), el("th", {}, ""))),
           tb))));
   } else {
     out.push(el("section", {}, el("h4", {}, "干渉する PR"),

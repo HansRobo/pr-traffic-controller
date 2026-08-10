@@ -169,15 +169,45 @@ class Candidate:
         return self.landing_tree is None
 
 
+@dataclass(frozen=True)
+class FileInterference:
+    """ペアの中の **1 ファイル** についての干渉。
+
+    ペアに 1 つの等級しか持たせないと、複数のファイルに跨るときに
+    最悪値へ丸められる。「16 ファイルが衝突し、19 ファイルは重なった
+    だけ」でも一律 L3 になり、どこを直せばよいのかが読み取れない。
+    ファイルごとに判定して持つ。
+    """
+
+    path: str
+    level: Level
+    stages: frozenset[int] = frozenset()
+    types: tuple[str, ...] = ()
+    hunks: tuple = ()
+    comment_only: bool = False
+    warnings: tuple[InterferenceWarning, ...] = ()
+
+    @property
+    def is_structural(self) -> bool:
+        return self.level is Level.L3
+
+
 @dataclass
 class PairResult:
     a: str
     b: str
     relation: Relation
     level: Level | None = None
-    conflict_files: tuple[ConflictFile, ...] = ()
+    files: tuple[FileInterference, ...] = ()
+    """重なったファイルすべて。ファイルごとに等級を持つ。"""
+
     overlap_files: frozenset[str] = frozenset()
     warnings: tuple[InterferenceWarning, ...] = ()
+
+    @property
+    def conflict_files(self) -> tuple[FileInterference, ...]:
+        """実際に衝突している（git がマージできない）ファイルだけ。"""
+        return tuple(f for f in self.files if f.level >= Level.L2)
 
     @property
     def is_conflict(self) -> bool:
@@ -186,7 +216,8 @@ class PairResult:
     @property
     def is_comment_only(self) -> bool:
         """衝突箇所がすべてコメント・文書だけか。"""
-        return bool(self.conflict_files) and all(c.comment_only for c in self.conflict_files)
+        conflicts = self.conflict_files
+        return bool(conflicts) and all(c.comment_only for c in conflicts)
 
     def key(self) -> tuple[str, str]:
         return (self.a, self.b) if self.a <= self.b else (self.b, self.a)

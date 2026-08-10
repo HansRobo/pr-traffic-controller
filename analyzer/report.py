@@ -29,27 +29,51 @@ def _pair_dict(p: PairResult) -> dict:
         d["level"] = int(p.level)
     if p.is_comment_only:
         d["comment_only"] = True
-    if p.conflict_files:
-        d["conflict_files"] = [
+    if p.files:
+        # ファイルごとに等級を持つ。ペアの level はその最大値でしかない。
+        d["files"] = [
             {
-                "path": c.path,
-                "stages": sorted(c.stages),
-                "types": list(c.types),
-                "structural": c.is_structural,
-                "comment_only": c.comment_only,
-                # ours = ペアの a 側、theirs = b 側（pair_merge の引数順）
-                "hunks": [
+                "path": f.path,
+                "level": int(f.level),
+                **({"stages": sorted(f.stages)} if f.stages else {}),
+                **({"types": list(f.types)} if f.types else {}),
+                **({"structural": True} if f.is_structural else {}),
+                **({"comment_only": True} if f.comment_only else {}),
+                **(
                     {
-                        "line": h.start_line,
-                        "a": list(h.ours),
-                        "b": list(h.theirs),
-                        **({"a_truncated": True} if h.ours_truncated else {}),
-                        **({"b_truncated": True} if h.theirs_truncated else {}),
+                        "hunks": [
+                            {
+                                "line": h.start_line,
+                                "a": list(h.ours),
+                                "b": list(h.theirs),
+                                **({"a_truncated": True} if h.ours_truncated else {}),
+                                **({"b_truncated": True} if h.theirs_truncated else {}),
+                                # チャンク単位の判定。ファイルに丸めると
+                                # 「1 箇所だけ実コード」が見えなくなる。
+                                **({"comment_only": True} if h.comment_only else {}),
+                            }
+                            for h in f.hunks
+                        ]
                     }
-                    for h in c.hunks
-                ],
+                    if f.hunks
+                    else {}
+                ),
+                **(
+                    {
+                        "warnings": [
+                            {
+                                "kind": w.kind.value,
+                                "detail": w.detail,
+                                **({"symbols": list(w.symbols)} if w.symbols else {}),
+                            }
+                            for w in f.warnings
+                        ]
+                    }
+                    if f.warnings
+                    else {}
+                ),
             }
-            for c in p.conflict_files
+            for f in p.files
         ]
     if p.overlap_files:
         d["overlap_files"] = sorted(p.overlap_files)

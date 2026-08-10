@@ -218,3 +218,49 @@ class TestCommentOnlyConflicts:
         r = pair(repo, line, "q", "s")
         assert r.level is Level.L2
         assert r.is_comment_only
+
+
+class TestPerFileAndPerHunkLevels:
+    """等級はファイルごと、コメント判定はチャンクごとに持つ。
+
+    ペアに 1 つしか持たせないと、複数ファイル・複数箇所に跨るときに
+    最悪値へ丸められ、どこを直せばよいのか読み取れなくなる。
+    """
+
+    def test_each_file_gets_its_own_level(self, repo, line):
+        """1 つのファイルは衝突し、もう 1 つは重なるだけ、という組み合わせ。"""
+        r = pair(repo, line, "u", "v")
+        levels = {f.path: f.level for f in r.files}
+        assert levels["shared.py"] is Level.L2, "こちらは衝突する"
+        assert levels["base.py"] is Level.L1, "こちらは重なるが自動マージされる"
+        assert r.level is Level.L2, "ペアの等級は最大値"
+
+    def test_conflict_files_only_lists_real_conflicts(self, repo, line):
+        r = pair(repo, line, "u", "v")
+        assert [f.path for f in r.conflict_files] == ["shared.py"]
+
+    def test_structural_level_is_per_file(self, repo, line):
+        r = pair(repo, line, "g", "i")
+        for f in r.conflict_files:
+            assert f.level is Level.L3
+            assert f.is_structural
+
+    def test_hunk_level_comment_flag(self, repo, line):
+        """コメントだけの箇所は、チャンク単位でも印が付く。"""
+        r = pair(repo, line, "o", "p")
+        f = r.conflict_files[0]
+        assert f.hunks and all(h.comment_only for h in f.hunks)
+        assert f.comment_only
+
+    def test_code_hunk_is_not_flagged(self, repo, line):
+        r = pair(repo, line, "w", "x")
+        f = r.conflict_files[0]
+        assert f.hunks and not any(h.comment_only for h in f.hunks)
+        assert not f.comment_only
+
+    def test_l1_file_carries_its_warnings(self, repo, line):
+        """同一関数の警告は、そのファイルの行に付く。"""
+        r = pair(repo, line, "k", "l")
+        f = next(f for f in r.files if f.path == "shared.py")
+        assert f.level is Level.L1
+        assert any(w.kind is WarningKind.SAME_FUNCTION_REGION for w in f.warnings)
