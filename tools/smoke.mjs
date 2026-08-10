@@ -18,11 +18,13 @@ class N {
 }
 const doc = {
   createElement:(t)=>new N(t),
+  createElementNS:(ns,t)=>new N(t),
   createTextNode:(t)=>{const n=new N("#text");n.text=t;return n;},
   querySelector:()=>new N("div"),
   querySelectorAll:()=>[],
   documentElement:new N("html"),
   getElementById:()=>null,
+  addEventListener(){},
 };
 globalThis.document = doc;
 globalThis.Node = N;
@@ -57,10 +59,25 @@ for (const line of Object.keys(data.interference)) {
     for (const [name, fn] of Object.entries(m.VIEWS)) {
       for (const author of ["", ...[...new Set(data.pull_requests.map(p=>p.author))].slice(0,2)]) {
         m.state.author = author;
-        try { const n = fn(); if(!n) throw new Error("null 返却"); }
-        catch(e){ fail++; console.log(`  ✗ ${line}/${preset}/${name}/author=${author||"-"}: ${e.message}`); }
+        // クラスタ詳細は各クラスタを、他は 1 回ずつ
+        const clusters = name === "cluster"
+          ? [...(data.orders[line].clusters||[]).map(c=>c.id), "存在しないID"]
+          : [null];
+        for (const cid of clusters) {
+          m.state.cluster = cid;
+          for (const lv of (name === "cluster" ? [1,2,3] : [2])) {
+            m.state.minLevel = lv;
+            // PR 選択あり/なしの両方（グラフの強調とパネル）
+            for (const sel of [null, data.pull_requests.find(p=>p.line===line)?.id ?? null]) {
+              m.state.pr = sel;
+              try { const n = fn(); if(!n) throw new Error("null 返却"); }
+              catch(e){ fail++; console.log(`  ✗ ${line}/${preset}/${name}/c=${cid}/lv=${lv}: ${e.message}`); }
+            }
+          }
+        }
       }
     }
+    m.state.cluster = null; m.state.pr = null; m.state.minLevel = 2;
   }
 }
 console.log(`  ${entry.repo}: ${Object.keys(data.interference).length} ライン × ${Object.keys(data.orders[Object.keys(data.orders)[0]].presets).length} プリセット を検証`);

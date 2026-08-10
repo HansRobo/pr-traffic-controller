@@ -267,3 +267,74 @@ details > summary { cursor: pointer; padding: 5px 0; font-size: 13px; }
 }
 ul.tight { margin: 6px 0; padding-left: 20px; }
 ul.tight li { margin: 2px 0; }
+
+/* --- サイドパネル -------------------------------------------------- */
+/* PR を開くのにページ遷移させない。一覧の文脈を保ったまま詳細を見る。 */
+.panel-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,.32);
+  opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 40;
+}
+.panel-backdrop[data-open] { opacity: 1; pointer-events: auto; }
+
+.side-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 100vw);
+  background: var(--surface); border-left: 1px solid var(--border);
+  box-shadow: -8px 0 28px rgba(0,0,0,.14);
+  transform: translateX(100%); transition: transform .2s ease;
+  z-index: 41; display: flex; flex-direction: column;
+}
+.side-panel[data-open] { transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .side-panel, .panel-backdrop { transition: none; }
+}
+.side-panel header {
+  position: static; display: flex; gap: 10px; align-items: flex-start;
+  padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--surface-2);
+}
+.side-panel header .grow { flex: 1 1 auto; min-width: 0; }
+.side-panel h2 { margin: 2px 0 0; font-size: 15px; line-height: 1.45; overflow-wrap: anywhere; }
+.side-panel .body { overflow-y: auto; padding: 14px 16px 40px; }
+.side-panel section { margin-bottom: 20px; }
+.side-panel section > h4 {
+  margin: 0 0 7px; font-size: 12px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--ink-2); font-weight: 700;
+}
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; font-size: 13px; }
+.kv dt { color: var(--ink-2); }
+.kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+/* --- グラフ -------------------------------------------------------- */
+.graph-wrap { overflow-x: auto; padding: 4px 0 2px; }
+.graph { display: block; }
+.graph .node rect { fill: var(--surface); stroke: var(--border-strong); stroke-width: 1; cursor: pointer; }
+.graph .node text { font-family: var(--mono); font-size: 11px; fill: var(--ink); pointer-events: none; }
+.graph .node.approved rect { stroke: var(--ok); stroke-width: 2; }
+.graph .node.draft rect { stroke-dasharray: 3 2; }
+.graph .node.rebase rect { fill: var(--critical-bg); stroke: var(--critical); }
+.graph .node.dim { opacity: .22; }
+.graph .node.sel rect { stroke: var(--accent); stroke-width: 2.5; }
+.graph .edge { fill: none; stroke-width: 1.6; }
+.graph .edge.dim { opacity: .07; }
+.graph .edge.lv1 { stroke: var(--l1); }
+.graph .edge.lv2 { stroke: var(--l2); }
+.graph .edge.lv3 { stroke: var(--l3); stroke-width: 2.4; }
+.graph .edge.stack { stroke: var(--ink-2); stroke-dasharray: none; }
+.graph .axis { stroke: var(--border); stroke-width: 1; }
+.graph .axis-label { font-size: 10px; fill: var(--ink-3); }
+.graph-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); margin: 6px 0 0; }
+.graph-legend i { display: inline-block; width: 22px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 5px; }
+
+/* --- クラスタ詳細 -------------------------------------------------- */
+.cluster-link { cursor: pointer; text-decoration: none; color: var(--accent); font-weight: 600; }
+.cluster-link:hover { text-decoration: underline; }
+.crumb { font-size: 13px; color: var(--ink-2); margin: 0 0 12px; }
+.crumb button { padding: 2px 8px; }
+.stat-row { display: flex; gap: 22px; flex-wrap: wrap; margin: 0 0 14px; }
+.stat-row div { font-size: 12px; color: var(--ink-2); }
+.stat-row strong { display: block; font-size: 20px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.pr-open {
+  background: none; border: none; padding: 0; font: inherit; font-family: var(--mono);
+  font-size: 12px; color: var(--accent); cursor: pointer; text-decoration: underline;
+  text-underline-offset: 2px; white-space: nowrap;
+}
+.pr-open:hover { color: var(--ink); }

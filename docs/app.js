@@ -19,6 +19,9 @@ const state = {
   author: "",
   preset: "balanced",
   hideDraft: false,
+  cluster: null,   // クラスタ詳細で見ているクラスタ
+  pr: null,        // サイドパネルで開いている PR
+  minLevel: 2,     // グラフに出す干渉レベルの下限
 };
 
 let INDEX = null;
@@ -58,10 +61,11 @@ function relativeTime(iso) {
 
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
-  for (const k of ["view", "repo", "line", "author", "preset"]) {
+  for (const k of ["view", "repo", "line", "author", "preset", "cluster", "pr"]) {
     if (p.get(k)) state[k] = p.get(k);
   }
   state.hideDraft = p.get("hideDraft") === "1";
+  if (p.get("minLevel")) state.minLevel = Number(p.get("minLevel"));
 }
 
 function writeHash() {
@@ -72,6 +76,9 @@ function writeHash() {
   if (state.author) p.set("author", state.author);
   if (state.preset !== "balanced") p.set("preset", state.preset);
   if (state.hideDraft) p.set("hideDraft", "1");
+  if (state.cluster) p.set("cluster", state.cluster);
+  if (state.pr) p.set("pr", state.pr);
+  if (state.minLevel !== 2) p.set("minLevel", String(state.minLevel));
   history.replaceState(null, "", "#" + p.toString());
 }
 
@@ -113,11 +120,20 @@ function prCard(id, { step = null, note = null, reasons = null } = {}) {
     "div",
     { class: cls },
     step !== null ? el("span", { class: "step-no" }, step) : null,
-    el("span", { class: "num" }, el("a", { href: pr.url, target: "_blank", rel: "noopener" }, shortId(id))),
+    el("span", { class: "num" }, prOpenButton(id)),
     body,
     ...prBadges(pr),
     el("span", { class: "author" }, pr.author),
   );
+}
+
+/** PR 番号のボタン。ページ遷移させず、サイドパネルで開く。 */
+function prOpenButton(id, label = null) {
+  return el("button", {
+    class: "pr-open",
+    title: "詳細をパネルで開く",
+    onclick: (e) => { e.stopPropagation(); openPanel(id); },
+  }, label ?? shortId(id));
 }
 
 function levelChip(level) {
@@ -269,7 +285,12 @@ function viewBoard() {
     });
     cbody.append(
       el("details", { open: true },
-        el("summary", {}, `${c.id}: ${c.members.length}件 / 内部衝突 ${c.internal_pairs}ペア`),
+        el("summary", {},
+          `${c.id}: ${c.members.length}件 / 内部衝突 ${c.internal_pairs}ペア　`,
+          el("span", {
+            class: "cluster-link",
+            onclick: (e) => { e.preventDefault(); e.stopPropagation(); state.view = "cluster"; state.cluster = c.id; render(); },
+          }, "詳細を見る →")),
         list),
     );
   }
@@ -296,7 +317,7 @@ function viewBoard() {
       for (const s of conflicts) {
         tb.append(el("tr", {},
           el("td", { class: "num" }, s.index),
-          el("td", {}, el("a", { href: PR.get(s.pr)?.url || "#", target: "_blank" }, shortId(s.pr)),
+          el("td", {}, prOpenButton(s.pr),
             " ", el("span", { class: "small muted" }, PR.get(s.pr)?.title || "")),
           el("td", { class: "small" },
             (s.conflict_files || []).map((f) => el("div", {}, el("code", {}, f.path))))));
@@ -308,6 +329,101 @@ function viewBoard() {
       el("h3", {}, "逐次マージによる検証",
         el("span", { class: "muted" }, "— 推測ではなく実際に git でマージした結果")),
       body));
+  }
+
+  return root;
+}
+
+
+// --- ビュー: クラスタ詳細 ---------------------------------------------
+
+function viewCluster() {
+  const o = DATA.orders[state.line];
+  const iv = DATA.interference[state.line];
+  const c = (o.clusters || []).find((x) => x.id === state.cluster);
+  const root = el("div");
+
+  root.append(el("p", { class: "crumb" },
+    el("button", { onclick: () => { state.view = "board"; state.cluster = null; render(); } }, "← 推奨マージ順"),
+    c ? `　/　クラスタ ${c.id}` : ""));
+
+  if (!c) {
+    root.append(el("div", { class: "empty" }, "クラスタが見つかりません。"));
+    return root;
+  }
+
+  const preset = o.presets[state.preset] || o.presets.balanced;
+  const rank = new Map(preset.order.map((id, i) => [id, i]));
+  const members = [...c.members].sort((a, b) => (rank.get(a) ?? 1e9) - (rank.get(b) ?? 1e9));
+  const memberSet = new Set(members);
+  const pairs = iv.pairs.filter(
+    (x) => memberSet.has(x.a) && memberSet.has(x.b) && x.level !== undefined && x.level >= 1,
+  );
+  const authors = [...new Set(members.map((m) => PR.get(m)?.author).filter(Boolean))];
+  const blocked = members.filter((m) => PR.get(m)?.base_conflict);
+
+  root.append(el("div", { class: "stat-row" },
+    el("div", {}, el("strong", {}, members.length), "PR"),
+    el("div", {}, el("strong", {}, pairs.filter((x) => x.level >= 2).length), "衝突ペア"),
+    el("div", {}, el("strong", {}, authors.length), "人の作業"),
+    el("div", {}, el("strong", {}, blocked.length), "要rebase"),
+  ));
+
+  root.append(el("p", { class: "hint" },
+    "このクラスタの中でだけ順序が問題になります。他のクラスタや独立PRとは"
+    + "並行に流して構いません。"
+    + (authors.length > 1 ? `　関係者: ${authors.join(", ")}` : "")));
+
+  // グラフ
+  root.append(el("div", { class: "panel" },
+    el("h3", {}, "干渉グラフ", el("span", { class: "muted" }, "— ノードをクリックすると詳細が開き、その PR の辺だけが強調されます")),
+    el("div", { class: "panel-body" },
+      graphFilters(),
+      interferenceGraph(members, { height: 300 }))));
+
+  // 推奨順
+  const stepByPr = new Map();
+  if (preset.simulation) for (const s of preset.simulation.steps) stepByPr.set(s.pr, s);
+  const list = el("div", {});
+  members.forEach((id, i) => {
+    const s = stepByPr.get(id);
+    let note = null;
+    if (s && s.result === "conflict") {
+      note = `逐次マージで衝突: ${(s.conflict_files || []).map((f) => f.path.split("/").pop()).slice(0, 3).join(", ")}`;
+    } else if (s && s.result === "skipped") note = "先に rebase が必要";
+    else if (s && s.result === "clean") note = "この順なら clean にマージできる";
+    list.append(prCard(id, { step: i + 1, note }));
+  });
+  root.append(el("div", { class: "panel" },
+    el("h3", {}, "このクラスタの推奨順", el("span", { class: "muted" }, `— ${state.preset}`)),
+    el("div", { class: "panel-body" }, list)));
+
+  // 衝突ペア一覧
+  if (pairs.length) {
+    const tb = el("tbody");
+    for (const x of pairs.sort((m, n) => n.level - m.level)) {
+      tb.append(el("tr", {},
+        el("td", {}, levelChip(x.level)),
+        el("td", {}, prOpenButton(x.a)),
+        el("td", {}, prOpenButton(x.b)),
+        el("td", { class: "small" },
+          (x.conflict_files || []).map((f) => el("div", {}, el("code", {}, f.path))),
+          !x.conflict_files?.length && x.overlap_files
+            ? el("div", { class: "muted" }, el("code", {}, x.overlap_files.slice(0, 2).join(", ")))
+            : null),
+        el("td", { class: "small" },
+          (x.warnings || []).map((w) => el("div", {},
+            el("span", { class: "badge warn" }, w.kind === "same_function_region" ? "同一関数" : "依存/設定"),
+            " ", el("code", {}, (w.symbols || [w.path]).join(", ")))))));
+    }
+    root.append(el("div", { class: "panel" },
+      el("h3", {}, `クラスタ内の干渉（${pairs.length}ペア）`),
+      el("div", { class: "table-scroll" },
+        el("table", {},
+          el("thead", {}, el("tr", {},
+            el("th", {}, "レベル"), el("th", {}, "PR A"), el("th", {}, "PR B"),
+            el("th", {}, "ファイル"), el("th", {}, "警告"))),
+          tb))));
   }
 
   return root;
@@ -378,7 +494,7 @@ function prLink(id) {
   const pr = PR.get(id);
   if (!pr) return el("span", {}, id);
   return el("span", {},
-    el("a", { href: pr.url, target: "_blank", rel: "noopener", class: "mono" }, shortId(id)),
+    prOpenButton(id),
     pr.is_draft ? el("span", { class: "badge draft" }, "D") : null,
     pr.review_decision === "APPROVED" ? el("span", { class: "badge approved" }, "✓") : null,
     el("div", { class: "small muted" }, pr.title.slice(0, 46)));
@@ -415,10 +531,10 @@ function viewStacks() {
       const crossing = prevRepo && pr && pr.repo !== prevRepo;
       chain.append(el("span", { class: "chain-arrow" + (crossing ? " cross-repo" : "") },
         crossing ? "⇒" : "→"));
-      chain.append(el("a", {
+      chain.append(el("button", {
         class: "chain-node" + (pr?.kind === "external_pr" ? " external" : ""),
-        href: pr?.url || "#", target: "_blank", rel: "noopener",
         title: pr?.title || id,
+        onclick: () => openPanel(id),
       }, pr ? `${pr.repo.split("/")[0]}#${pr.number}` : id));
       prevRepo = pr?.repo || prevRepo;
     });
@@ -586,7 +702,7 @@ function viewTable() {
   for (const p of rows) {
     tb.append(el("tr", {},
       el("td", { class: "num" }, rank.get(p.id) ?? "—"),
-      el("td", { class: "num" }, el("a", { href: p.url, target: "_blank", rel: "noopener" }, shortId(p.id))),
+      el("td", { class: "num" }, prOpenButton(p.id)),
       el("td", {}, p.title, " ", ...prBadges(p)),
       el("td", {}, p.author),
       el("td", { class: "small" }, p.review_decision),
@@ -599,14 +715,309 @@ function viewTable() {
   return root;
 }
 
+
+
+// --- 干渉グラフ -------------------------------------------------------
+//
+// 弧ダイアグラム。**横軸が推奨マージ順**（左が先）で、そこに 2 種類の
+// 関係を上下に分けて描く:
+//
+//   下側（有向・矢印）  スタック依存。親が入るまで子はマージできない
+//                       ＝ 本当の意味で「ブロックしている」関係
+//   上側（無向）        衝突。どちらの順で流しても誰かが解決する。
+//                       向きを描かないのは、解析が測っているのが
+//                       「同時マージ可能性」という対称な性質だから
+//
+// 全部描くと密になるので、レベル下限・著者・PR 選択で絞れるようにする。
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const svg = (tag, attrs = {}, ...kids) => {
+  const n = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === false || v === null || v === undefined) continue;
+    if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    n.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return n;
+};
+
+function interferenceGraph(ids, { height = 300 } = {}) {
+  const o = DATA.orders[state.line];
+  const iv = DATA.interference[state.line];
+  const preset = o.presets[state.preset] || o.presets.balanced;
+  const rank = new Map(preset.order.map((id, i) => [id, i]));
+
+  // 推奨順に並べる。横位置そのものが「いつ流すか」を表す。
+  const nodes = [...ids].sort((a, b) => (rank.get(a) ?? 1e9) - (rank.get(b) ?? 1e9));
+  const idx = new Map(nodes.map((id, i) => [id, i]));
+
+  const conflicts = iv.pairs.filter(
+    (p) => p.level !== undefined && p.level >= state.minLevel
+      && idx.has(p.a) && idx.has(p.b),
+  );
+  const stacks = [];
+  for (const id of nodes) {
+    for (const anc of (PR.get(id)?.stack.ancestors) || []) {
+      if (idx.has(anc)) stacks.push({ from: anc, to: id });
+    }
+  }
+
+  const STEP = Math.max(46, Math.min(96, Math.floor(1120 / Math.max(nodes.length, 1))));
+  const NW = Math.min(STEP - 8, 54), NH = 22;
+  const W = Math.max(nodes.length * STEP + 40, 320);
+  const midY = Math.round(height / 2);
+
+  const x = (id) => 20 + idx.get(id) * STEP + STEP / 2;
+
+  const g = svg("svg", {
+    class: "graph", width: W, height,
+    viewBox: `0 0 ${W} ${height}`, role: "img",
+    "aria-label": "干渉グラフ",
+  });
+
+  g.append(svg("defs", {},
+    svg("marker", {
+      id: "arrow", viewBox: "0 0 8 8", refX: 7, refY: 4,
+      markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse",
+    }, svg("path", { d: "M0,0 L8,4 L0,8 z", fill: "var(--ink-2)" }))));
+
+  // 推奨順の軸
+  g.append(svg("line", { class: "axis", x1: 10, y1: midY, x2: W - 10, y2: midY }));
+  g.append(svg("text", { class: "axis-label", x: 12, y: midY - NH / 2 - 8 }, "← 先にマージ"));
+  g.append(svg("text", { class: "axis-label", x: W - 12, y: midY - NH / 2 - 8, "text-anchor": "end" }, "後 →"));
+
+  const focus = state.pr && idx.has(state.pr) ? state.pr : null;
+  const touches = (a, b) => !focus || a === focus || b === focus;
+
+  // 上: 衝突（無向）
+  for (const c of conflicts) {
+    const x1 = x(c.a), x2 = x(c.b);
+    const span = Math.abs(x2 - x1);
+    const r = Math.min(span / 2, midY - NH / 2 - 14);
+    const dir = -1;
+    g.append(svg("path", {
+      class: `edge lv${c.level}` + (touches(c.a, c.b) ? "" : " dim"),
+      d: `M${x1},${midY + dir * (NH / 2)} A${span / 2},${r} 0 0,${x2 > x1 ? 1 : 0} ${x2},${midY + dir * (NH / 2)}`,
+    }, svg("title", {}, `${shortId(c.a)} ↔ ${shortId(c.b)} — L${c.level} 衝突`
+      + `（順序は「誰が rebase するか」を決めるだけ）`)));
+  }
+
+  // 下: スタック依存（有向）
+  for (const s of stacks) {
+    const x1 = x(s.from), x2 = x(s.to);
+    const span = Math.abs(x2 - x1);
+    const r = Math.min(span / 2, midY - NH / 2 - 14);
+    g.append(svg("path", {
+      class: "edge stack" + (touches(s.from, s.to) ? "" : " dim"),
+      "marker-end": "url(#arrow)",
+      d: `M${x1},${midY + NH / 2} A${span / 2},${r} 0 0,${x2 > x1 ? 0 : 1} ${x2},${midY + NH / 2}`,
+    }, svg("title", {}, `${shortId(s.from)} → ${shortId(s.to)} — ${shortId(s.from)} がマージされるまで ${shortId(s.to)} はマージできない`)));
+  }
+
+  // ノード
+  for (const id of nodes) {
+    const pr = PR.get(id);
+    const cls = ["node",
+      pr?.review_decision === "APPROVED" ? "approved" : "",
+      pr?.is_draft ? "draft" : "",
+      pr?.base_conflict ? "rebase" : "",
+      focus === id ? "sel" : "",
+      focus && focus !== id
+        && !conflicts.some((c) => (c.a === id && c.b === focus) || (c.b === id && c.a === focus))
+        && !stacks.some((s) => (s.from === id && s.to === focus) || (s.to === id && s.from === focus))
+        ? "dim" : "",
+    ].join(" ");
+    const cx = x(id);
+    g.append(svg("g", {
+      class: cls, role: "button", tabindex: "0",
+      onclick: () => openPanel(id),
+      onkeydown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openPanel(id); } },
+    },
+      svg("rect", { x: cx - NW / 2, y: midY - NH / 2, width: NW, height: NH, rx: 4 }),
+      svg("text", { x: cx, y: midY + 4, "text-anchor": "middle" }, shortId(id)),
+      svg("title", {}, `${id}\n${pr?.title || ""}\n著者: ${pr?.author || "?"}`),
+    ));
+  }
+
+  const wrap = el("div", {});
+  wrap.append(el("div", { class: "graph-wrap" }, g));
+  wrap.append(el("div", { class: "graph-legend" },
+    el("span", {}, el("i", { style: "border-color: var(--l2)" }), "上側の弧 = 衝突（無向。順序は誰が払うかを決めるだけ）"),
+    el("span", {}, el("i", { style: "border-color: var(--ink-2)" }), "下側の矢印 = スタック依存（親が先。真のブロック）"),
+    el("span", {}, "枠が緑 = Approved / 破線 = Draft / 赤 = 要rebase"),
+  ));
+  if (focus) {
+    wrap.append(el("p", { class: "hint" },
+      `${shortId(focus)} に関係する辺だけを強調しています。`,
+      el("button", { onclick: closePanel }, "強調を解除")));
+  }
+  return wrap;
+}
+
+/** グラフの絞り込み。全部出すと密になるので既定は L2 以上。 */
+function graphFilters() {
+  const row = el("div", { class: "filters" }, el("span", { class: "small muted" }, "グラフに出す干渉:"));
+  for (const [lv, label] of [[1, "L1以上（同一ファイル含む）"], [2, "L2以上（実際に衝突）"], [3, "L3のみ（構造衝突）"]]) {
+    row.append(el("button", {
+      "aria-pressed": state.minLevel === lv,
+      onclick: () => { state.minLevel = lv; render(); },
+      title: LEVEL_DESC[lv],
+    }, label));
+  }
+  return row;
+}
+
+// --- サイドパネル -----------------------------------------------------
+// PR を見るのにページ遷移させない。一覧の文脈を保ったまま詳細を開く。
+
+function openPanel(id) {
+  state.pr = id;
+  writeHash();
+  renderPanel();
+}
+
+function closePanel() {
+  state.pr = null;
+  writeHash();
+  renderPanel();
+}
+
+/** その PR が関わる干渉ペアを、相手・レベル付きで集める。 */
+function pairsFor(id) {
+  const iv = DATA.interference[state.line];
+  if (!iv) return [];
+  return iv.pairs
+    .filter((p) => (p.a === id || p.b === id) && p.level !== undefined && p.level >= 1)
+    .map((p) => ({ ...p, other: p.a === id ? p.b : p.a }))
+    .sort((x, y) => y.level - x.level);
+}
+
+function renderPanel() {
+  const backdrop = $("#panel-backdrop");
+  const panel = $("#side-panel");
+  if (!state.pr || !PR.has(state.pr)) {
+    backdrop.removeAttribute("data-open");
+    panel.removeAttribute("data-open");
+    panel.setAttribute("aria-hidden", "true");
+    return;
+  }
+  const pr = PR.get(state.pr);
+  const o = DATA.orders[state.line] || {};
+  const preset = (o.presets || {})[state.preset] || (o.presets || {}).balanced;
+  const rank = preset ? preset.order.indexOf(pr.id) : -1;
+  const metrics = (o.metrics || {})[pr.id];
+  const cluster = (o.clusters || []).find((c) => c.members.includes(pr.id));
+  const related = pairsFor(pr.id);
+
+  const body = el("div", { class: "body" });
+
+  // 位置づけ
+  const stats = el("div", { class: "stat-row" });
+  if (rank >= 0) stats.append(el("div", {}, el("strong", {}, rank + 1), `推奨順（${preset.order.length}件中）`));
+  if (metrics) {
+    stats.append(el("div", {}, el("strong", {}, metrics.blocks), "スタックでブロック"));
+    stats.append(el("div", {}, el("strong", {}, related.length), "干渉する相手"));
+  }
+  stats.append(el("div", {}, el("strong", {}, `+${pr.additions}/-${pr.deletions}`), `${pr.changed_files_count} ファイル`));
+  body.append(stats);
+
+  // 属性
+  const kv = el("dl", { class: "kv" });
+  const put = (k, v) => { kv.append(el("dt", {}, k), el("dd", {}, v)); };
+  put("著者", pr.author);
+  put("レビュー", pr.review_decision);
+  put("ブランチ", el("code", {}, `${pr.head.repo === DATA.source.repo ? "" : pr.head.repo.split("/")[0] + ":"}${pr.head.branch}`));
+  put("マージ先", el("code", {}, pr.base.branch));
+  if (cluster) {
+    put("クラスタ", el("button", {
+      class: "cluster-link",
+      onclick: () => { closePanel(); state.view = "cluster"; state.cluster = cluster.id; render(); },
+    }, `${cluster.id}（${cluster.members.length}件）`));
+  } else {
+    put("クラスタ", el("span", { class: "muted" }, "独立（並行に流せる）"));
+  }
+  if (pr.stack.depth > 0) {
+    put("スタック", el("span", {}, ...pr.stack.ancestors.map((a, i) =>
+      el("span", {}, i ? " → " : "", prOpenButton(a))), " → ", el("strong", {}, shortId(pr.id))));
+  }
+  if (pr.blocks.length) {
+    put("これを待つPR", el("span", {}, ...pr.blocks.map((b, i) => el("span", {}, i ? " " : "", prOpenButton(b)))));
+  }
+  if (pr.duplicate_of) {
+    put("重複", el("span", {}, ...pr.duplicate_of.map((d) => prOpenButton(d)), " と同一コミット"));
+  }
+  body.append(el("section", {}, el("h4", {}, "この PR について"), kv));
+
+  // ベース衝突
+  if (pr.base_conflict && pr.base_conflict_files) {
+    body.append(el("section", {},
+      el("h4", {}, "ベースとの衝突（まず rebase が必要）"),
+      el("ul", { class: "tight small" },
+        ...pr.base_conflict_files.map((f) =>
+          el("li", {}, el("code", {}, f.path), " ", el("span", { class: "muted" }, `ステージ ${f.stages.join(",")}`))))));
+  }
+
+  // 干渉相手
+  if (related.length) {
+    const rows = el("tbody");
+    for (const r of related) {
+      const other = PR.get(r.other);
+      rows.append(el("tr", {},
+        el("td", {}, levelChip(r.level)),
+        el("td", {}, prOpenButton(r.other), el("div", { class: "small muted" }, other ? other.title.slice(0, 40) : "")),
+        el("td", { class: "small" },
+          (r.conflict_files || []).slice(0, 3).map((f) => el("div", {}, el("code", {}, f.path.split("/").pop()))),
+          (r.warnings || []).map((w) => el("div", { class: "small" },
+            el("span", { class: "badge warn" }, w.kind === "same_function_region" ? "同一関数" : "依存/設定"),
+            " ", el("code", {}, (w.symbols || [w.path]).join(", ")))))));
+    }
+    body.append(el("section", {},
+      el("h4", {}, `干渉する PR（${related.length}件)`),
+      el("div", { class: "table-scroll" },
+        el("table", {},
+          el("thead", {}, el("tr", {}, el("th", {}, "レベル"), el("th", {}, "相手"), el("th", {}, "内容"))),
+          rows))));
+  }
+
+  // 変更ファイル
+  if (pr.changed_files && pr.changed_files.length) {
+    body.append(el("section", {},
+      el("h4", {}, `変更ファイル（${pr.changed_files.length}件）`),
+      el("details", {},
+        el("summary", { class: "muted" }, "一覧を開く"),
+        el("ul", { class: "tight small mono" },
+          ...pr.changed_files.map((f) => el("li", {}, f))))));
+  }
+
+  panel.replaceChildren(
+    el("header", {},
+      el("div", { class: "grow" },
+        el("div", { class: "mono small muted" }, pr.id),
+        el("h2", {}, pr.title),
+        el("div", {}, ...prBadges(pr))),
+      el("a", { class: "btn", href: pr.url, target: "_blank", rel: "noopener", title: "GitHub で開く" }, "GitHub ↗"),
+      el("button", { onclick: closePanel, title: "閉じる（Esc）", "aria-label": "閉じる" }, "✕")),
+    body,
+  );
+  panel.setAttribute("data-open", "");
+  panel.setAttribute("aria-hidden", "false");
+  backdrop.setAttribute("data-open", "");
+}
+
 // --- 描画 --------------------------------------------------------------
 
-const VIEWS = { board: viewBoard, conflicts: viewConflicts, stacks: viewStacks, mine: viewMine, table: viewTable };
+const VIEWS = { board: viewBoard, cluster: viewCluster, conflicts: viewConflicts, stacks: viewStacks, mine: viewMine, table: viewTable };
 
 function render() {
   writeHash();
   for (const b of document.querySelectorAll("#view-tabs button")) {
-    b.setAttribute("aria-selected", String(b.dataset.view === state.view));
+    // クラスタ詳細は推奨マージ順の下位ページなので、タブはそちらを選択状態にする
+    const active = state.view === "cluster" ? "board" : state.view;
+    b.setAttribute("aria-selected", String(b.dataset.view === active));
   }
   for (const b of document.querySelectorAll("#line-tabs button")) {
     b.setAttribute("aria-pressed", String(b.dataset.line === state.line));
@@ -614,11 +1025,12 @@ function render() {
   const host = $("#view");
   host.replaceChildren();
   try {
-    host.append(VIEWS[state.view]());
+    host.append((VIEWS[state.view] || VIEWS.board)());
   } catch (err) {
     host.append(el("div", { class: "banner" }, "描画エラー: " + err.message));
     console.error(err);
   }
+  renderPanel();
 }
 
 function setupChrome() {
@@ -642,8 +1054,17 @@ function setupChrome() {
   setupLines();
 
   for (const b of document.querySelectorAll("#view-tabs button")) {
-    b.addEventListener("click", () => { state.view = b.dataset.view; render(); });
+    b.addEventListener("click", () => {
+      state.view = b.dataset.view;
+      state.cluster = null;
+      render();
+    });
   }
+
+  $("#panel-backdrop").addEventListener("click", closePanel);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.pr) closePanel();
+  });
 
   $("#theme-toggle").addEventListener("click", () => {
     const cur = document.documentElement.getAttribute("data-theme");
