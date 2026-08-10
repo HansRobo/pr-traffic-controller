@@ -136,6 +136,16 @@ jobs:
           path: docs/data
           key: analysis-${{ github.run_id }}
 
+      - name: アセットにバージョンを打つ
+        # デプロイしても古い app.js / styles.css がブラウザに残っていると、
+        # 直したはずの挙動が直っていないように見える。実行ごとに変わる
+        # クエリを付けて、確実に取り直させる。
+        run: |
+          V="${{ github.run_id }}"
+          sed -i "s|href=\"styles.css\"|href=\"styles.css?v=$V\"|; s|src=\"app.js\"|src=\"app.js?v=$V\"|" docs/index.html
+          grep -o 'styles.css?v=[0-9]*' docs/index.html | head -1
+          grep -o 'app.js?v=[0-9]*' docs/index.html | head -1
+
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
