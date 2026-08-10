@@ -265,6 +265,31 @@ def build(
     # 「ベースと衝突している N 件を rebase すれば M ペアの解析が可能になる」
     # は、このツールが出せる最も具体的な指示なので、埋もれさせずに前面へ出す。
     actions = []
+
+    # 指定し忘れた統合ラインは、黙って除外すると「衝突 0 件」という
+    # 誤った安心を与える。何件がどこにぶら下がっているかを前面に出す。
+    unlisted: dict[str, list[str]] = {}
+    for pr_id, reason in skipped:
+        if "含まれていない" not in reason:
+            continue
+        branch = reason.split("'")[1] if "'" in reason else "(不明)"
+        unlisted.setdefault(branch, []).append(pr_id)
+    for branch, ids in sorted(unlisted.items(), key=lambda kv: -len(kv[1])):
+        actions.append(
+            {
+                "kind": "unlisted_integration_line",
+                "line": line_names[0] if line_names else "",
+                "branch": branch,
+                "pr_count": len(ids),
+                "prs": sorted(ids),
+                "message": (
+                    f"{len(ids)} 件の PR がブランチ '{branch}' に向いていますが、"
+                    f"解析対象の統合ラインに含まれていないため除外されています。"
+                    f"統合先として扱うなら lines に '{branch}' を追加してください。"
+                ),
+            }
+        )
+
     for name in line_names:
         blocked = [c.id for c in candidates.get(name, []) if c.has_base_conflict]
         degraded = interference_out[name]["level_counts"].get("degraded", 0)

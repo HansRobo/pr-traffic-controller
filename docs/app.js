@@ -257,7 +257,8 @@ function viewBoard() {
   const root = el("div");
 
   // 行動可能なヘッドライン
-  const actions = DATA.actions.filter((a) => a.line === line);
+  const actions = DATA.actions.filter(
+    (a) => a.line === line || a.kind === "unlisted_integration_line");
   if (actions.length) {
     const box = el("div", { class: "actions" });
     for (const a of actions) {
@@ -284,6 +285,20 @@ function viewBoard() {
                 : null,
             ),
           ),
+        );
+      } else if (a.kind === "unlisted_integration_line") {
+        box.append(
+          el("div", { class: "action" },
+            el("div", { class: "big" }, a.pr_count),
+            el("div", {},
+              el("p", {}, el("strong", {}, "件の PR が解析対象外です")),
+              el("div", { class: "sub" },
+                "これらは ", el("code", {}, a.branch),
+                " に向いていますが、解析対象の統合ラインに含まれていません。"
+                + "統合先として扱うなら、Actions の lines に追加して実行し直してください。"),
+              el("div", { class: "sub" },
+                "※ 除外された PR は衝突の集計にも入っていないので、"
+                + "この画面の「衝突なし」はそれらを含みません。"))),
         );
       } else if (a.kind === "order_does_not_change_throughput") {
         box.append(
