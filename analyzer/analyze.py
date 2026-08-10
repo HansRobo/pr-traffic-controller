@@ -239,8 +239,8 @@ def run(
                 "optimal": False,
                 "method": "greedy_simulation_with_restarts",
                 "objective_note": (
-                    "clean に landing できる件数を最大化する。"
-                    "他プリセットが最小化する rebase 総負担はむしろ増えうる。"
+                    "手を入れずに（衝突なく）マージできる件数を最大化する。"
+                    "他の方針が最小化する rebase の総負担は、むしろ増えることがある。"
                 ),
             }
 

@@ -153,6 +153,14 @@ function levelChip(level) {
   return el("span", { class: `lv lv-${level}`, title: LEVEL_DESC[level] }, "L" + level);
 }
 
+/** 解析側のプリセット識別子 -> 画面に出す名前。 */
+const PRESET_LABEL = {
+  "balanced": "バランス重視",
+  "approve-first": "Approve優先",
+  "least-conflict": "衝突を最小に",
+  "max-landing": "マージ数を最大に",
+};
+
 const LEVEL_DESC = {
   0: "無干渉（変更ファイルが重ならない）",
   1: "同一ファイル・別領域（テキスト上はマージ可能）",
@@ -195,10 +203,10 @@ function viewBoard() {
           el("div", { class: "action info" },
             el("div", { class: "big" }, a.merged),
             el("div", {},
-              el("p", {}, el("strong", {}, "件はどの順序でも変わらない")),
+              el("p", {}, el("strong", {}, "件 — どの順序でマージしても変わらない")),
               el("div", { class: "sub" },
                 `${a.trials} 通りの順序を実際にマージして確認した。`
-                + `順序が決めるのは「誰が rebase するか」であって、何件流せるかではない。`),
+                + `順序が決めるのは「誰が rebase するか」であって、何件マージできるかではない。`),
             ),
           ),
         );
@@ -214,15 +222,15 @@ function viewBoard() {
       el("div", { class: "action info" },
         el("div", { class: "big" }, `${sens.worst_observed}–${sens.best_observed}`),
         el("div", {},
-          el("p", {}, el("strong", {}, "件 — 順序によって landing 数が変わる")),
+          el("p", {}, el("strong", {}, "件 — 順序によってマージできる件数が変わる")),
           el("div", { class: "sub" },
-            `${sens.trials} 通り試行。max-landing プリセットはこの上限を狙う。`),
+            `${sens.trials} 通り試行。「マージ数を最大化」の方針がこの上限を狙う。`),
         ),
       ),
     );
   }
 
-  // プリセット選択
+  // プリセット選択。キーは解析側の識別子なので、表示は日本語に置き換える。
   const presetRow = el("div", { class: "filters" }, el("span", { class: "small muted" }, "順序の方針:"));
   for (const [name, p] of Object.entries(o.presets)) {
     const merged = p.simulation ? p.simulation.merged : "?";
@@ -233,7 +241,7 @@ function viewBoard() {
         title: p.objective_note
           || "rebase の総負担（誰がどれだけ書き直すか）を最小化する。"
              + (p.optimal ? "この目的関数に対しては厳密最適。" : ""),
-      }, `${name}（${merged}件landing）`),
+      }, `${PRESET_LABEL[name] || name}（衝突なし ${merged}件）`),
     );
   }
   root.append(presetRow);
@@ -246,19 +254,20 @@ function viewBoard() {
       ? "ℹ️ " + preset.objective_note
       : "ℹ️ rebase の総負担を最小化する順序。"
         + (preset.optimal
-            ? "クラスタごとに厳密最適だが、これは「負担が最小」という意味であって"
-              + "「landing 件数が最大」ではない（件数を優先するなら max-landing）。"
+            ? "クラスタごとに厳密最適だが、これは「rebase の負担が最小」という意味であって、"
+              + "「衝突なくマージできる件数が最大」ではない"
+              + "（件数を優先するなら「マージ数を最大に」）。"
             : "")));
 
-  // 並行に流せるもの / クラスタ
+  // 独立にマージ可能なもの / クラスタ
   const cols = el("div", { class: "grid cols-2" });
 
   const indep = o.independent.filter((id) => !state.hideDraft || !PR.get(id)?.is_draft);
   const indepPanel = el("panel", {});
   cols.append(
     el("div", { class: "panel" },
-      el("h3", {}, "並行に流してよい ", el("strong", {}, String(indep.length)), " 件",
-        el("span", { class: "muted" }, "— 互いに干渉しないので順不同")),
+      el("h3", {}, "独立にマージ可能 ", el("strong", {}, String(indep.length)), " 件",
+        el("span", { class: "muted" }, "— 互いに干渉しないので、どの順番でもよい")),
       el("div", { class: "panel-body" },
         indep.length
           ? indep.map((id) => prCard(id))
@@ -384,7 +393,7 @@ function viewCluster() {
 
   root.append(el("p", { class: "hint" },
     "このクラスタの中でだけ順序が問題になります。他のクラスタや独立PRとは"
-    + "並行に流して構いません。"
+    + "互いに干渉しないので、どの順番でマージしても構いません。"
     + (authors.length > 1 ? `　関係者: ${authors.join(", ")}` : "")));
 
   // グラフ
@@ -408,7 +417,7 @@ function viewCluster() {
     list.append(prCard(id, { step: i + 1, note }));
   });
   root.append(el("div", { class: "panel" },
-    el("h3", {}, "このクラスタの推奨順", el("span", { class: "muted" }, `— ${state.preset}`)),
+    el("h3", {}, "このクラスタの推奨順", el("span", { class: "muted" }, `— ${PRESET_LABEL[state.preset] || state.preset}`)),
     el("div", { class: "panel-body" }, list)));
 
   // 衝突ペア一覧
@@ -518,7 +527,7 @@ function prLink(id) {
 function viewStacks() {
   const root = el("div");
   root.append(el("p", { class: "hint" },
-    "スタックした PR は、親がマージされるまで流せない（ハード制約）。"
+    "スタックした PR は、親がマージされるまでマージできない（ハード制約）。"
     + "横軸がスタック深度、帯がリポジトリ。帯の境界を跨ぐ矢印は、"
     + "別リポジトリに続いていることを示す。"));
 
@@ -557,7 +566,7 @@ function viewStacks() {
       box.append(el("div", { class: "panel-body small muted" },
         el("strong", {}, "運用上の注意: "),
         "フォーク側リポジトリに対して開かれた PR は、上流リポジトリへ"
-        + "直接マージできない。この鎖を流すには、上流から順にマージしたうえで、"
+        + "直接マージできない。この鎖を通すには、上流から順にマージしたうえで、"
         + "フォーク側の PR を上流リポジトリに対して開き直す必要がある。"));
     }
     root.append(box);
@@ -647,7 +656,7 @@ function viewMine() {
     }
   }
 
-  // 待つ理由がある PR は「今すぐ流せる」ではない
+  // 待つ理由がある PR は「今すぐマージできる」ではない
   for (const id of waiting.keys()) ready.delete(id);
 
   const box = (title, map, hint) => {
@@ -664,7 +673,7 @@ function viewMine() {
   };
 
   const grid = el("div", { class: "grid cols-2" });
-  grid.append(box("今すぐ流せる", ready, "ベース衝突がなく、待つべき親も衝突相手もない"));
+  grid.append(box("今すぐマージできる", ready, "ベース衝突がなく、待つべき親も衝突相手もない"));
   grid.append(box("あなたが待たせている", blocking, "他の人の作業がここで止まっている"));
   grid.append(box("あなたが待っている", waiting, null));
   grid.append(box("あなたのTODO", todo, null));
@@ -985,7 +994,7 @@ function prDetail(id) {
         class: "cluster-link",
         onclick: () => { closePanel(); state.view = "cluster"; state.cluster = cluster.id; render(); },
       }, `${cluster.id}（${cluster.members.length}件）`)
-    : el("span", { class: "muted" }, "独立（並行に流せる）"));
+    : el("span", { class: "muted" }, "独立（単独でマージ可能）"));
   if (pr.stack.depth > 0) {
     put("スタック", el("span", {}, ...pr.stack.ancestors.map((a, i) =>
       el("span", {}, i ? " → " : "", prOpenButton(a))), " → ", el("strong", {}, shortId(pr.id))));
