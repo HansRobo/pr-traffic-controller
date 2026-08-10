@@ -568,25 +568,28 @@ function viewCluster() {
   if (pairs.length) {
     const tb = el("tbody");
     for (const x of pairs.sort((m, n) => n.level - m.level)) {
-      tb.append(el("tr", {},
+      const xHunks = (x.conflict_files || []).filter((f) => f.hunks && f.hunks.length);
+      const xActions = el("td", {});
+      const xRow = el("tr", {},
         el("td", {}, levelChip(x.level)),
         el("td", {}, prOpenButton(x.a)),
         el("td", {}, prOpenButton(x.b)),
         el("td", { class: "small" },
-          (x.conflict_files || []).map((f) =>
-            el("div", {}, fileLink(f.path),
-              f.hunks && f.hunks.length
-                ? el("details", { class: "hunk-details" },
-                    el("summary", { class: "small" }, `衝突箇所を見る（${f.hunks.length}）`),
-                    conflictHunks(f, x.a, x.b))
-                : null)),
+          (x.conflict_files || []).map((f) => el("div", {}, fileLink(f.path))),
           !x.conflict_files?.length && x.overlap_files
             ? el("div", { class: "muted" }, el("code", {}, x.overlap_files.slice(0, 2).join(", ")))
             : null),
         el("td", { class: "small" },
           (x.warnings || []).map((w) => el("div", {},
             el("span", { class: "badge warn" }, w.kind === "same_function_region" ? "同一関数" : "依存/設定"),
-            " ", el("code", {}, (w.symbols || [w.path]).join(", ")))))));
+            " ", el("code", {}, (w.symbols || [w.path]).join(", "))))),
+        xActions);
+      if (xHunks.length) {
+        xActions.append(expandableRow(tb, xRow, 6, `衝突箇所（${xHunks.length}）`, () =>
+          el("div", {}, ...xHunks.map((f) => conflictHunks(f, x.a, x.b)))));
+      } else {
+        tb.append(xRow);
+      }
     }
     root.append(el("div", { class: "panel" },
       el("h3", {}, `クラスタ内の干渉（${pairs.length}ペア）`),
@@ -594,7 +597,7 @@ function viewCluster() {
         el("table", {},
           el("thead", {}, el("tr", {},
             el("th", {}, "レベル"), el("th", {}, "PR A"), el("th", {}, "PR B"),
-            el("th", {}, "ファイル"), el("th", {}, "警告"))),
+            el("th", {}, "ファイル"), el("th", {}, "警告"), el("th", {}, ""))),
           tb))));
   }
 
@@ -856,29 +859,33 @@ function viewConflicts() {
   const t = el("table");
   t.append(el("thead", {}, el("tr", {},
     el("th", {}, "レベル"), el("th", {}, "PR A"), el("th", {}, "PR B"),
-    el("th", {}, "衝突/重複ファイル"), el("th", {}, "警告"))));
+    el("th", {}, "衝突/重複ファイル"), el("th", {}, "警告"), el("th", {}, ""))));
   const tb = el("tbody");
   for (const p of rows) {
     const files = p.conflict_files && p.conflict_files.length
       ? p.conflict_files.map((f) =>
           el("div", {}, fileLink(f.path),
-            f.structural ? el("span", { class: "badge warn", title: `ステージ ${f.stages.join(",")}` }, "構造") : null,
-            f.hunks && f.hunks.length
-              ? el("details", { class: "hunk-details" },
-                  el("summary", { class: "small" }, `衝突箇所を見る（${f.hunks.length}）`),
-                  conflictHunks(f, p.a, p.b))
-              : null))
+            f.structural ? el("span", { class: "badge warn", title: `ステージ ${f.stages.join(",")}` }, "構造") : null))
       : (p.overlap_files || []).slice(0, 4).map((f) => el("div", { class: "muted" }, fileLink(f)));
     const warns = (p.warnings || []).map((w) =>
       el("div", { class: "small" },
         el("span", { class: "badge warn" }, w.kind === "same_function_region" ? "同一関数" : "依存/設定"),
         " ", w.symbols ? el("code", {}, w.symbols.join(", ")) : el("code", {}, w.path)));
-    tb.append(el("tr", {},
+    const withHunks = (p.conflict_files || []).filter((f) => f.hunks && f.hunks.length);
+    const actions = el("td", {});
+    const row = el("tr", {},
       el("td", {}, levelChip(p.level)),
       el("td", {}, prLink(p.a)),
       el("td", {}, prLink(p.b)),
       el("td", { class: "small" }, files),
-      el("td", {}, warns)));
+      el("td", {}, warns),
+      actions);
+    if (withHunks.length) {
+      actions.append(expandableRow(tb, row, 6, `衝突箇所（${withHunks.length}ファイル）`, () =>
+        el("div", {}, ...withHunks.map((f) => conflictHunks(f, p.a, p.b)))));
+    } else {
+      tb.append(row);
+    }
   }
   t.append(tb);
   root.append(el("div", { class: "table-scroll" }, t));
@@ -1298,27 +1305,87 @@ function pairsFor(id) {
 }
 
 
-/** 衝突箇所の両側を並べて見せる。
- *  `a` / `b` はペアの PR id（merge-tree の ours / theirs に対応）。 */
+
+/** 表の行の直下に、全幅の展開行を足す。
+ *
+ *  差分を列の中に押し込むと横幅が足りず、1 行が数語で折り返して読めない。
+ *  `colspan` で表の幅いっぱいを使う行に逃がす。 */
+function expandableRow(tbody, row, colCount, label, buildContent) {
+  const holder = el("tr", { class: "expand-row", hidden: true });
+  const cell = el("td", { colspan: String(colCount) });
+  holder.append(cell);
+  let built = false;
+  const btn = el("button", {
+    class: "pr-open expand-toggle",
+    onclick: (e) => {
+      e.stopPropagation();
+      const open = holder.hasAttribute("hidden");
+      if (open && !built) { cell.append(buildContent()); built = true; }
+      if (open) holder.removeAttribute("hidden");
+      else holder.setAttribute("hidden", "");
+      btn.textContent = (open ? "▾ " : "▸ ") + label;
+    },
+  }, "▸ " + label);
+  tbody.append(row, holder);
+  return btn;
+}
+
+/** 2 つの行列の最長共通部分列。衝突ハンクは高々数十行なので素朴な DP でよい。 */
+function lineDiff(a, b) {
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { out.push({ t: "same", s: a[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ t: "a", s: a[i] }); i++; }
+    else { out.push({ t: "b", s: b[j] }); j++; }
+  }
+  while (i < n) out.push({ t: "a", s: a[i++] });
+  while (j < m) out.push({ t: "b", s: b[j++] });
+  return out;
+}
+
+/** 衝突箇所を差分として見せる。
+ *
+ *  ここで並ぶ 2 つは「変更前と変更後」ではなく、**同じ場所に対する
+ *  2 つの案**である。どちらが + でどちらが − かは本質的に任意なので、
+ *  記号だけに頼らず、行頭に PR 番号を出して取り違えを防ぐ。 */
 function conflictHunks(file, aId, bId) {
   if (!file.hunks || !file.hunks.length) return null;
-  const side = (id, lines, truncated) => {
-    const pr = PR.get(id);
-    return el("div", { class: "hunk-side" },
-      el("div", { class: "hunk-head" },
-        prOpenButton(id),
-        pr ? authorChip(pr.author, pr.author_avatar_url, { compact: true }) : null,
-        pr ? el("span", { class: "small muted" }, pr.title.slice(0, 34)) : null),
-      el("pre", { class: "hunk-code" },
-        (lines || []).join("\n") + (truncated ? "\n…（以降省略）" : "")));
-  };
-  const box = el("div", {});
+  const box = el("div", { class: "hunks" });
+
+  const legend = el("div", { class: "diff-legend" },
+    el("span", { class: "diff-key a" }, "−"), prOpenButton(aId), el("span", { class: "muted" }, "側　"),
+    el("span", { class: "diff-key b" }, "＋"), prOpenButton(bId), el("span", { class: "muted" }, "側"),
+    el("span", { class: "small muted" }, "　どちらが正しいという意味ではなく、同じ場所に対する 2 つの案です"));
+  box.append(legend);
+
   for (const h of file.hunks) {
+    const rows = lineDiff(h.a || [], h.b || []);
+    const pre = el("div", { class: "diff" });
+    for (const r of rows) {
+      const mark = r.t === "a" ? "−" : r.t === "b" ? "＋" : " ";
+      pre.append(el("div", { class: "diff-line " + r.t },
+        el("span", { class: "diff-mark" }, mark),
+        el("span", { class: "diff-text" }, r.s === "" ? " " : r.s)));
+    }
+    if (h.a_truncated || h.b_truncated) {
+      pre.append(el("div", { class: "diff-line trunc" },
+        el("span", { class: "diff-mark" }, " "),
+        el("span", { class: "diff-text" }, "…（以降省略）")));
+    }
     box.append(el("div", { class: "hunk" },
-      el("div", { class: "hunk-loc" }, el("code", {}, `${file.path}:${h.line}`)),
-      el("div", { class: "hunk-sides" },
-        side(aId, h.a, h.a_truncated),
-        side(bId, h.b, h.b_truncated))));
+      el("div", { class: "hunk-loc" },
+        el("code", {}, `${file.path}:${h.line}`),
+        el("span", { class: "small muted" },
+          `　${(h.a || []).length} 行 ↔ ${(h.b || []).length} 行`)),
+      pre));
   }
   return box;
 }
@@ -1379,7 +1446,9 @@ function prDetail(id) {
     const tb = el("tbody");
     for (const r of related) {
       const other = PR.get(r.other);
-      tb.append(el("tr", {},
+      const rHunks = (r.conflict_files || []).filter((f) => f.hunks && f.hunks.length);
+      const rActions = el("td", {});
+      const rRow = el("tr", {},
         el("td", {}, levelChip(r.level)),
         el("td", {}, prOpenButton(r.other),
           el("div", { class: "small muted" }, other ? other.title.slice(0, 44) : ""),
@@ -1387,26 +1456,29 @@ function prDetail(id) {
         el("td", { class: "small" },
           (r.conflict_files || []).map((f) =>
             el("div", {}, fileLink(f.path),
-              f.structural ? el("span", { class: "badge warn" }, "構造") : null,
-              f.hunks && f.hunks.length
-                ? el("details", { class: "hunk-details" },
-                    el("summary", { class: "small" }, `衝突箇所を見る（${f.hunks.length}）`),
-                    conflictHunks(f, r.a, r.b))
-                : null)),
+              f.structural ? el("span", { class: "badge warn" }, "構造") : null)),
           !r.conflict_files?.length && r.overlap_files
             ? el("div", { class: "muted" }, el("code", {}, r.overlap_files.slice(0, 3).join(", ")))
             : null),
         el("td", { class: "small" },
           (r.warnings || []).map((w) => el("div", {},
             el("span", { class: "badge warn" }, w.kind === "same_function_region" ? "同一関数" : "依存/設定"),
-            " ", el("code", {}, (w.symbols || [w.path]).join(", ")))))));
+            " ", el("code", {}, (w.symbols || [w.path]).join(", "))))),
+        rActions);
+      if (rHunks.length) {
+        rActions.append(expandableRow(tb, rRow, 5, `衝突箇所（${rHunks.length}）`, () =>
+          el("div", {}, ...rHunks.map((f) => conflictHunks(f, r.a, r.b)))));
+      } else {
+        tb.append(rRow);
+      }
     }
     out.push(el("section", {},
       el("h4", {}, `干渉する PR（${related.length}件）`),
       el("div", { class: "table-scroll" },
         el("table", {},
           el("thead", {}, el("tr", {},
-            el("th", {}, "レベル"), el("th", {}, "相手"), el("th", {}, "ファイル"), el("th", {}, "警告"))),
+            el("th", {}, "レベル"), el("th", {}, "相手"), el("th", {}, "ファイル"),
+            el("th", {}, "警告"), el("th", {}, ""))),
           tb))));
   } else {
     out.push(el("section", {}, el("h4", {}, "干渉する PR"),
