@@ -1465,7 +1465,9 @@ function interferenceGraph(ids, { height = 300 } = {}) {
     const r = Math.min(span / 2, midY - NH / 2 - 14);
     // 何ファイルでぶつかっているかを線の太さで表す。等級だけでは
     // 「1 ファイルだけ」と「16 ファイル」の区別が付かない。
-    const width = Math.min(1.2 + Math.log2(c.count) * 1.5, 7);
+    // 1 ファイル=1.4px から始め、ファイル数が倍になるごとに約 2px 太くする。
+    // 線形にすると多数派のペアが潰れ、対数だけだと差が出ないので両方使う。
+    const width = Math.min(1.4 + Math.log2(c.count) * 2.0, 9);
     const breakdown = c.files
       .slice(0, 6)
       .map((f) => `  L${f.level}${f.structural ? "(構造)" : ""}${f.comment_only ? "(コメント)" : ""} ${f.path}`)
@@ -1473,7 +1475,7 @@ function interferenceGraph(ids, { height = 300 } = {}) {
     g.append(svg("path", {
       class: `edge lv${c.level}` + (c.comment_only ? " comment-only" : "")
         + (touches(c.a, c.b) ? "" : " dim"),
-      "stroke-width": width,
+      style: `stroke-width:${width}px`,
       d: `M${x1},${midY - NH / 2} A${span / 2},${r} 0 0,${x2 > x1 ? 1 : 0} ${x2},${midY - NH / 2}`,
     }, svg("title", {},
       `${shortId(c.a)} ↔ ${shortId(c.b)}\n`
@@ -1489,6 +1491,7 @@ function interferenceGraph(ids, { height = 300 } = {}) {
     const r = Math.min(span / 2, midY - NH / 2 - 14);
     g.append(svg("path", {
       class: "edge stack intentional" + (touches(s.from, s.to) ? "" : " dim"),
+      style: "stroke-width:1.2px",
       "marker-end": "url(#arrow)",
       d: `M${x1},${midY + NH / 2} A${span / 2},${r} 0 0,${x2 > x1 ? 0 : 1} ${x2},${midY + NH / 2}`,
     }, svg("title", {}, `${shortId(s.from)} → ${shortId(s.to)} — ${shortId(s.from)} がマージされるまで ${shortId(s.to)} はマージできない`)));

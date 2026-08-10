@@ -326,11 +326,14 @@ ul.tight li { margin: 2px 0; }
 .graph .node.rebase rect { fill: var(--critical-bg); stroke: var(--critical); }
 .graph .node.dim { opacity: .22; }
 .graph .node.sel rect { stroke: var(--accent); stroke-width: 2.5; }
-.graph .edge { fill: none; stroke-width: 1.6; }
+/* 太さはファイル数に応じて JS が inline style で決める。
+   ここで stroke-width を指定すると、CSS 規則が SVG の
+   プレゼンテーション属性より優先されて効かなくなる。 */
+.graph .edge { fill: none; }
 .graph .edge.dim { opacity: .07; }
 .graph .edge.lv1 { stroke: var(--l1); }
 .graph .edge.lv2 { stroke: var(--l2); }
-.graph .edge.lv3 { stroke: var(--l3); stroke-width: 2.4; }
+.graph .edge.lv3 { stroke: var(--l3); }
 .graph .edge.stack { stroke: var(--ink-2); stroke-dasharray: none; }
 .graph .axis { stroke: var(--border); stroke-width: 1; }
 .graph .axis-label { font-size: 10px; fill: var(--ink-3); }
@@ -482,7 +485,7 @@ ul.tight li { margin: 2px 0; }
 .side-panel { width: min(880px, 100vw); }
 
 /* スタック依存は「意図された構造」なので、干渉より控えめに描く */
-.graph .edge.intentional { stroke: var(--ink-3); stroke-dasharray: 4 3; stroke-width: 1.2; }
+.graph .edge.intentional { stroke: var(--ink-3); stroke-dasharray: 4 3; }
 .legend-stack { border-top: 2px dashed var(--ink-3) !important; }
 
 /* --- マージ手順 ----------------------------------------------------- */
@@ -547,7 +550,7 @@ details.loc[open] > summary { border-bottom: 1px solid var(--border); border-rad
 .badge.comment-only { color: var(--ink-2); border-style: dotted; }
 .seq-row.conflict-light { border-left-color: var(--ink-3); }
 .seq-row.conflict-light .seq-mark { color: var(--ink-2); }
-.graph .edge.comment-only { stroke-dasharray: 2 3; stroke-width: 1.1; }
+.graph .edge.comment-only { stroke-dasharray: 2 3; }
 .legend-comment { border-top: 2px dotted var(--l2) !important; }
 
 /* ディレクトリ行での絞り込み */
