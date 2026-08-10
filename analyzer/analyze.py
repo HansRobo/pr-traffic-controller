@@ -351,6 +351,27 @@ def analyze_and_cache(
     return 1 if failures else 0
 
 
+def forget(repo: str, outdir: Path, *, verbose: bool = True) -> int:
+    """蓄積から 1 リポジトリを取り除く。
+
+    解析結果を git に置かない運用では、対象を外す手段が別に要る
+    （ファイルを消す PR を出す、という操作ができないため）。
+    """
+    index = load_index(outdir)
+    analyses = index.get("analyses", [])
+    remaining = [e for e in analyses if e["repo"] != repo]
+    if len(remaining) == len(analyses):
+        print(f"{repo} は蓄積に含まれていません。", file=sys.stderr)
+        return 1
+    for e in analyses:
+        if e["repo"] == repo:
+            (outdir / e["file"]).unlink(missing_ok=True)
+    write_index(outdir, remaining)
+    if verbose:
+        print(f"{repo} を蓄積から削除しました（残り {len(remaining)} 件）", file=sys.stderr)
+    return 0
+
+
 def targets_from_index(outdir: Path) -> list[dict]:
     """索引に載っているリポジトリを、再解析用の対象リストとして返す。"""
     return [
@@ -380,12 +401,20 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="索引に載っているリポジトリをすべて再解析する（定期更新用）",
     )
+    ap.add_argument(
+        "--forget",
+        metavar="OWNER/NAME",
+        help="指定したリポジトリを蓄積から取り除く（解析はしない）",
+    )
     ap.add_argument("--outdir", type=Path, default=Path("docs/data"))
     ap.add_argument("--no-forks", action="store_true")
     ap.add_argument("--workdir", type=Path, default=None, help="作業リポジトリを残す場所")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args(argv)
     verbose = not args.quiet
+
+    if args.forget:
+        return forget(args.forget, args.outdir, verbose=verbose)
 
     try:
         assert_git_version()

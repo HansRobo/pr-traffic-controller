@@ -1,12 +1,15 @@
 name: 解析
 
-# 解析対象はワークフローに埋め込まない。
+# 解析対象はワークフローにもリポジトリにも埋め込まない。
 #
-#   Run workflow でリポジトリを指定 -> 解析して結果を蓄積（キャッシュ）
-#   定期実行                        -> すでに蓄積されている全件を再解析
+#   Run workflow でリポジトリを指定 -> 解析して結果を蓄積
+#   定期実行                        -> 蓄積されている全件を再解析
 #
-# 一度解析したリポジトリは docs/data/index.json に残り、以後は自動で
-# 更新されていく。
+# 解析結果は **Actions のキャッシュ** に置き、git にはコミットしない。
+# サイトはキャッシュの内容を含めて Pages へ直接デプロイする
+# （リポジトリの履歴が解析結果の更新で埋まらないようにするため）。
+#
+# Pages の設定: Settings → Pages → Source を「GitHub Actions」にすること。
 
 on:
   workflow_dispatch:
@@ -22,16 +25,19 @@ on:
         description: フォーク側の PR も含める
         type: boolean
         default: true
-      publish:
-        description: 結果を公開データに追加する（外すと artifact のみ）
+      forget:
+        description: 指定したリポジトリを蓄積から削除する（解析はしない）
         type: boolean
-        default: true
+        default: false
   schedule:
-    # 6時間ごとに、蓄積済みの全リポジトリを更新する。
+    # 6時間ごとに蓄積済みの全リポジトリを更新する。
+    # キャッシュは 7 日アクセスが無いと退避されるので、この頻度なら保たれる。
     - cron: "0 */6 * * *"
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   group: analyze
@@ -40,6 +46,9 @@ concurrency:
 jobs:
   analyze:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -61,46 +70,54 @@ jobs:
         with:
           python-version: "3.12"
 
+      # 蓄積済みの解析結果を復元する。キーは実行ごとに変え、restore-keys で
+      # 直近のものを拾う（同じキーには保存し直せないため）。
+      - name: 解析結果を復元
+        uses: actions/cache/restore@v4
+        with:
+          path: docs/data
+          key: analysis-${{ github.run_id }}
+          restore-keys: analysis-
+
+      - name: 復元された対象を表示
+        run: |
+          if [ -f docs/data/index.json ]; then
+            python3 -c "
+          import json
+          d = json.load(open('docs/data/index.json'))
+          print('蓄積済み:', ', '.join(a['repo'] for a in d['analyses']) or '(なし)')
+          "
+          else
+            echo "蓄積なし（初回、またはキャッシュが退避された）"
+          fi
+
       - name: 解析を実行
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -z "${{ inputs.repo }}" ]; then
-            # 定期実行: 蓄積済みの全件を更新
+          if [ "${{ inputs.forget }}" = "true" ]; then
+            python -m analyzer.analyze --forget "${{ inputs.repo }}" --outdir docs/data
+          elif [ -z "${{ inputs.repo }}" ]; then
             python -m analyzer.analyze --refresh --outdir docs/data
-            echo "publish=true" >> "$GITHUB_ENV"
-          elif [ "${{ inputs.publish }}" = "false" ]; then
-            # 公開せず結果だけ見たい場合
-            python -m analyzer.analyze \
-              --repo "${{ inputs.repo }}" --lines "${{ inputs.lines }}" \
-              ${{ inputs.include_forks == false && '--no-forks' || '' }} \
-              --out adhoc-analysis.json
-            echo "publish=false" >> "$GITHUB_ENV"
           else
-            # 指定リポジトリを解析してキャッシュに追加
             python -m analyzer.analyze \
               --repo "${{ inputs.repo }}" --lines "${{ inputs.lines }}" \
               ${{ inputs.include_forks == false && '--no-forks' || '' }} \
               --outdir docs/data
-            echo "publish=true" >> "$GITHUB_ENV"
           fi
 
       - name: サマリを出力
         run: |
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json, pathlib
-          adhoc = pathlib.Path("adhoc-analysis.json")
-          if adhoc.exists():
-              docs = {"(未公開)": json.loads(adhoc.read_text())}
-          else:
-              idx = pathlib.Path("docs/data/index.json")
-              if not idx.exists():
-                  print("解析結果がありません"); raise SystemExit
-              index = json.loads(idx.read_text())
-              docs = {
-                  e["repo"]: json.loads((idx.parent / e["file"]).read_text())
-                  for e in index["analyses"]
-              }
+          idx = pathlib.Path("docs/data/index.json")
+          if not idx.exists():
+              print("解析結果がありません"); raise SystemExit
+          index = json.loads(idx.read_text())
+          docs = {
+              e["repo"]: json.loads((idx.parent / e["file"]).read_text())
+              for e in index["analyses"]
+          }
           print("## 解析結果\n")
           print("| リポジトリ | PR | 衝突ペア | 要rebase |")
           print("|---|---:|---:|---:|")
@@ -113,31 +130,16 @@ jobs:
                   print(f"- **{repo}** — {a['message']}")
           PY
 
-      - name: 成果物をアップロード
-        uses: actions/upload-artifact@v4
+      - name: 解析結果を保存
+        uses: actions/cache/save@v4
         with:
-          name: analysis
-          path: |
-            docs/data/*.json
-            adhoc-analysis.json
-          if-no-files-found: ignore
+          path: docs/data
+          key: analysis-${{ github.run_id }}
 
-      - name: 結果をコミット
-        if: env.publish == 'true'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/data/*.json
-          if git diff --staged --quiet; then
-            echo "変更なし"
-            exit 0
-          fi
-          git commit -m "chore: 解析結果を更新 ($(date -u +%Y-%m-%dT%H:%MZ))"
-          # checkout 後に他のコミットが載っている可能性があるので、
-          # push の直前に取り込む。これが無いと non-fast-forward で落ちる。
-          for i in 1 2 3; do
-            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && git push && exit 0
-            echo "push に失敗。再試行 $i"
-            sleep 5
-          done
-          exit 1
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - name: Pages へデプロイ
+        id: deploy
+        uses: actions/deploy-pages@v4

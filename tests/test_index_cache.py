@@ -168,3 +168,27 @@ class TestResilience:
         (tmp_path / "index.json").write_text("{ 壊れた JSON")
         analyze.analyze_and_cache([{"repo": "owner/one", "lines": ["main"]}], tmp_path, verbose=False)
         assert [e["repo"] for e in index_of(tmp_path)["analyses"]] == ["owner/one"]
+
+
+class TestForget:
+    """解析結果を git に置かない運用では、対象を外す手段が別に要る。"""
+
+    def test_removes_entry_and_file(self, tmp_path, stub_run):
+        analyze.analyze_and_cache([{"repo": "owner/one", "lines": ["main"]}], tmp_path, verbose=False)
+        analyze.analyze_and_cache([{"repo": "owner/two", "lines": ["main"]}], tmp_path, verbose=False)
+
+        assert analyze.forget("owner/one", tmp_path, verbose=False) == 0
+        assert [e["repo"] for e in index_of(tmp_path)["analyses"]] == ["owner/two"]
+        assert not (tmp_path / "owner-one.json").exists()
+        assert (tmp_path / "owner-two.json").exists()
+
+    def test_unknown_repo_reports_failure(self, tmp_path, stub_run):
+        analyze.analyze_and_cache([{"repo": "owner/one", "lines": ["main"]}], tmp_path, verbose=False)
+        assert analyze.forget("owner/absent", tmp_path, verbose=False) == 1
+        assert [e["repo"] for e in index_of(tmp_path)["analyses"]] == ["owner/one"]
+
+    def test_forgotten_repo_is_not_refreshed(self, tmp_path, stub_run):
+        analyze.analyze_and_cache([{"repo": "owner/one", "lines": ["main"]}], tmp_path, verbose=False)
+        analyze.analyze_and_cache([{"repo": "owner/two", "lines": ["main"]}], tmp_path, verbose=False)
+        analyze.forget("owner/one", tmp_path, verbose=False)
+        assert [t["repo"] for t in analyze.targets_from_index(tmp_path)] == ["owner/two"]
