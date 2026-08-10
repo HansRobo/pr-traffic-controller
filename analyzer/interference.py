@@ -22,7 +22,7 @@ import itertools
 from dataclasses import replace
 from typing import TYPE_CHECKING, Iterable
 
-from . import codekind, semantic
+from . import codekind, parallel, semantic
 from .model import (
     Candidate,
     ConflictFile,
@@ -211,11 +211,24 @@ def analyze_line(
 
     :param include_l0: L0 も結果に含めるか。既定では省く
         （「pairs に載っていない＝L0」という規約。61 PR でも大半が L0）。
+
+    ペアは互いに独立（`Repo` を読むだけ）なので並列に流すが、**結果は
+    `combinations` の順に並べる**。順序が実行ごとに変わると公開 JSON が
+    無意味に揺れる。
     """
     cands = sorted(candidates, key=lambda c: c.id)
-    out: list[PairResult] = []
-    for a, b in itertools.combinations(cands, 2):
-        r = analyze_pair(
+    pairs = list(itertools.combinations(cands, 2))
+
+    # ペアの fan-out に入る前に hunk のキャッシュを温めておく。
+    # `changed_hunks(line, tree, path)` は候補ごとに 1 回でよいのに
+    # ペアごとに問われるので、温めないと並列度の分だけ重複計算が走る
+    # （直列なら 2 回目以降がキャッシュに当たるが、並列だと同時に走る）。
+    if detect_semantic:
+        _prewarm_hunks(repo, line, pairs)
+
+    def run(pair: tuple[Candidate, Candidate]) -> PairResult:
+        a, b = pair
+        return analyze_pair(
             repo,
             line,
             a,
@@ -223,10 +236,40 @@ def analyze_line(
             config_patterns=config_patterns,
             detect_semantic=detect_semantic,
         )
-        if r.level is Level.L0 and not include_l0:
+
+    return [
+        r
+        for r in parallel.imap(run, pairs)
+        if include_l0 or r.level is not Level.L0
+    ]
+
+
+def _prewarm_hunks(
+    repo: "Repo", line: str, pairs: list[tuple[Candidate, Candidate]]
+) -> None:
+    """ペア解析が実際に問う `(landing_tree, path)` を先に計算しておく。
+
+    候補の変更ファイル全部ではなく **重なったファイルだけ** に絞る。
+    100 ファイル触る PR でも重なるのは数件で、全部温めると逆に高くつく。
+
+    絞り込みの条件は `analyze_pair` と `semantic.detect` が実際に問う条件の
+    写しである（対象拡張子は `semantic.detect` 側が正）。食い違っても
+    答えは変わらず「並列時に温めが効かない」だけなので、気づけない。
+    `FUNCTION_AWARE_SUFFIXES` を広げるときはここも一緒に直すこと。
+    """
+    needed: set[tuple[str, str]] = set()
+    for a, b in pairs:
+        if a.id in b.ancestors or b.id in a.ancestors or a.line != b.line:
             continue
-        out.append(r)
-    return out
+        if a.has_base_conflict or b.has_base_conflict:
+            continue
+        for path in a.changed_files & b.changed_files:
+            if path.endswith(semantic.FUNCTION_AWARE_SUFFIXES):
+                assert a.landing_tree and b.landing_tree
+                needed.add((a.landing_tree, path))
+                needed.add((b.landing_tree, path))
+
+    list(parallel.imap(lambda k: repo.changed_hunks(line, k[0], k[1]), sorted(needed)))
 
 
 def build_candidate(

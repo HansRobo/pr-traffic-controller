@@ -13,17 +13,38 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 import time
 
+from . import parallel
 from .model import PullRequest, ReviewNote
 
 #: 一時的な失敗を示す文字列。GitHub の GraphQL は、重いページング付き
 #: クエリに対してときどき 502 を返す（大きなリポジトリで実測 3 回に 1 回）。
 #: 恒久的なエラー（権限不足・存在しないリポジトリ）と混同しないよう、
 #: 明示的に列挙したものだけを再試行する。
+#:
 _TRANSIENT = ("HTTP 502", "HTTP 503", "HTTP 504", "timeout", "timed out",
               "connection reset", "EOF occurred", "TLS handshake")
 _RETRIES = 4
+
+#: 並列に投げるようになったので、二次レート制限も再試行の対象にする。
+#: これは「速すぎる」という意味の 403 で、待てば必ず通る。ただし
+#: **一時的失敗と同じ待ち方では通らない** —— GitHub は最低 1 分空けることを
+#: 求めるので、2→4→8 秒の指数待ちでは 4 回すべてが制限ウィンドウの中で
+#: 空振りして恒久エラーとして落ちる。別枠で扱う。
+_RATE_LIMITED = ("secondary rate limit", "exceeded a rate limit",
+                 "abuse detection", "retry your request again later")
+_RATE_LIMIT_WAIT = 65.0
+
+#: GraphQL を同時に投げる本数の**プロセス全体での**上限。CPU ではなく
+#: レート制限で決める値なのでコア数には連動させない。
+#:
+#: セマフォにしているのは、`collect` の中だけで並列度を絞っても足りないため
+#: —— 複数リポジトリの準備が先読みで同時に走るので、関数ローカルな上限は
+#: 「上限 × 走っている準備の数」まで膨らむ。1 トークンに対する同時本数を
+#: 抑えたいのだから、上限もトークン（＝プロセス）側に持たせる。
+_API_SLOTS = threading.Semaphore(6)
 
 _PR_QUERY = """
 query($owner:String!, $name:String!, $endCursor:String) {
@@ -59,30 +80,33 @@ class GitHubError(RuntimeError):
 
 
 def _gh(*args: str) -> str:
-    """`gh` を呼ぶ。一時的な失敗は待って再試行する。"""
+    """`gh` を呼ぶ。一時的な失敗は待って再試行する。
+
+    同時本数は `_API_SLOTS` で押さえる。ここで押さえるのは、呼び出し側が
+    どこから何本呼んでいても 1 箇所で効かせるため。
+    """
     delay = 2.0
     for attempt in range(1, _RETRIES + 1):
-        cp = subprocess.run(["gh", *args], capture_output=True, text=True)
+        with _API_SLOTS:
+            cp = subprocess.run(["gh", *args], capture_output=True, text=True)
         if cp.returncode == 0:
             return cp.stdout
         err = cp.stderr or ""
-        transient = any(s in err for s in _TRANSIENT)
-        if not transient or attempt == _RETRIES:
+        rate_limited = any(s in err for s in _RATE_LIMITED)
+        if not (rate_limited or any(s in err for s in _TRANSIENT)) or attempt == _RETRIES:
             # 引数をそのまま出すとクエリ本文で埋まるので、要点だけ残す
             head = " ".join(args[:3])
             raise GitHubError(f"gh {head} … failed: {err.strip()[-300:]}")
+        wait = _RATE_LIMIT_WAIT if rate_limited else delay
         print(
-            f"  一時的な失敗のため再試行します（{attempt}/{_RETRIES - 1}）: "
+            f"  {'レート制限' if rate_limited else '一時的な失敗'}のため "
+            f"{wait:.0f} 秒待って再試行します（{attempt}/{_RETRIES - 1}）: "
             f"{err.strip()[-80:]}",
             file=sys.stderr,
         )
-        time.sleep(delay)
+        time.sleep(wait)
         delay *= 2
     raise GitHubError("unreachable")
-
-
-def repo_info(repo: str) -> dict:
-    return json.loads(_gh("api", f"repos/{repo}"))
 
 
 def discover_forks(repo: str) -> list[str]:
@@ -252,13 +276,22 @@ def _review_notes(node: dict) -> tuple[ReviewNote, ...]:
 
 
 def collect(target_repo: str, *, include_forks: bool = True) -> tuple[list[PullRequest], list[str]]:
-    """対象リポジトリとそのフォーク群の全オープン PR を集める。"""
-    prs = fetch_pull_requests(target_repo)
+    """対象リポジトリとそのフォーク群の全オープン PR を集める。
+
+    フォークごとのクエリは独立なので並列に投げる。ただし **返す順序は
+    `discover_forks` の順に固定する** —— `forks` はそのまま JSON に出るので、
+    完了順に積むと解析結果が実行ごとに揺れる。
+    """
+    candidates = discover_forks(target_repo) if include_forks else []
+    # 対象リポジトリも同じプールに入れて、フォークの待ちと重ねる。
+    # 同時本数の上限は `_gh` 側（`_API_SLOTS`）で効かせる。
+    repos = [target_repo, *candidates]
+    results = list(parallel.imap(fetch_pull_requests, repos))
+
+    prs = list(results[0])
     forks: list[str] = []
-    if include_forks:
-        for fork in discover_forks(target_repo):
-            fork_prs = fetch_pull_requests(fork)
-            if fork_prs:
-                forks.append(fork)
-                prs.extend(fork_prs)
+    for fork, fork_prs in zip(candidates, results[1:]):
+        if fork_prs:
+            forks.append(fork)
+            prs.extend(fork_prs)
     return prs, forks

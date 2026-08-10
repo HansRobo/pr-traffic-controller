@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from . import parallel
 from .interference import conflict_files_from
 from .mergetree import MergeTreeError
 from .model import Candidate, ConflictFile
@@ -56,10 +57,13 @@ def simulate(
 ) -> Simulation:
     """順序どおりに 1 件ずつ統合ラインへ積み上げる。
 
-    累積ツリーは合成コミットなので、**`--merge-base` を元のライン先端に
-    明示ピン留めする**（`Repo.merge_tree` が常にそうする）。git に
-    マージベースを推論させると、合成コミットに対して静かに誤った結果を
-    返す。
+    累積は **tree OID のまま持ち回す**（合成コミットは作らない）。
+    `merge-tree` は tree を `ours` に取れるので commit にする必要が無く、
+    挟めば clean なステップごとに git プロセスが 1 本増えるだけである。
+
+    そのため **`--merge-base` を元のライン先端に明示ピン留めすることが必須**
+    になる（`Repo.merge_tree` が常にそうする）。累積 tree には歴史が無いので、
+    git にマージベースを推論させると静かに誤った結果を返す。
 
     衝突したステップはスキップして続行する。そこで打ち切ると
     「この順序で何件流せるか」が分からなくなるため。
@@ -87,7 +91,7 @@ def simulate(
             continue
 
         if result.clean:
-            acc = repo.commit_tree(result.tree_oid, acc, message=f"sim {pr_id}")
+            acc = result.tree_oid
             sim.merged += 1
             sim.steps.append(Step(index=i, pr_id=pr_id, result="clean"))
         else:
@@ -180,7 +184,8 @@ def greedy_max_landing(
             except MergeTreeError:
                 continue
             if r.clean:
-                acc = repo.commit_tree(r.tree_oid, acc, message=f"greedy {pr_id}")
+                # `simulate` と同じ理由で tree OID のまま持ち回す
+                acc = r.tree_oid
                 landed = pr_id
                 break
 
@@ -208,38 +213,50 @@ def best_landing_order(
     *,
     restarts: int = 12,
     seed: int = 0,
-) -> tuple[list[str], int]:
-    """landing 件数が最大の順序を探す。返り値は (順序, 実測 landing 件数)。
+) -> tuple[list[str], int, Simulation]:
+    """landing 件数が最大の順序を探す。
+
+    返り値は (順序, 実測 landing 件数, その順序の Simulation)。3 番目を
+    返すのは、呼び出し側が同じ順序をもう一度流さずに済むようにするため。
 
     単純な貪欲は近視眼的で、実運用のデータでは推奨順と同じ件数に留まり、
     ランダム探索が見つけた最良に届かなかった。走査順を変えた
-    リスタートを重ねて最良を採る。1 本あたり O(n) 回の merge-tree
-    なので、十数本試しても数秒で済む。
+    リスタートを重ねて最良を採る。
+
+    **ここが検証フェーズの支配項**である（`greedy_max_landing` 1 本が
+    O(n²) 回の merge-tree で、それを 1+restarts 本走らせる）。各本は
+    互いに完全に独立なので並列に流すが、**畳み込みは投入順で行う** ——
+    完了順に畳むと同点のときに選ばれる順序が実行ごとに変わる。
     """
     import random
 
+    # 乱数は先に使い切る。並列実行でも消費順が変わらないようにするため。
     rng = random.Random(seed)
-    best_order = greedy_max_landing(repo, line_oid, candidates, pool, predecessors)
-    best = simulate(repo, line_oid, best_order, candidates).merged
-
     scan = [p for p in pool if p in candidates]
+    ranks: list[dict[str, int] | None] = [None]  # None = 素の貪欲（基準）
     for _ in range(restarts):
         shuffled = scan[:]
         rng.shuffle(shuffled)
-        rank = {p: i for i, p in enumerate(shuffled)}
+        ranks.append({p: i for i, p in enumerate(shuffled)})
+
+    def attempt(rank: dict[str, int] | None) -> tuple[list[str], Simulation]:
         order = greedy_max_landing(
             repo,
             line_oid,
             candidates,
             pool,
             predecessors,
-            tie_break=lambda p: rank.get(p, 0),
+            tie_break=None if rank is None else (lambda p: rank.get(p, 0)),
         )
-        merged = simulate(repo, line_oid, order, candidates).merged
-        if merged > best:
-            best, best_order = merged, order
+        return order, simulate(repo, line_oid, order, candidates)
 
-    return best_order, best
+    results = parallel.imap(attempt, ranks)
+    best_order, best_sim = next(results)
+    for order, sim in results:
+        if sim.merged > best_sim.merged:
+            best_order, best_sim = order, sim
+
+    return best_order, best_sim.merged, best_sim
 
 
 def probe_order_sensitivity(
@@ -250,6 +267,7 @@ def probe_order_sensitivity(
     *,
     trials: int = 30,
     seed: int = 0,
+    baseline: Simulation | None = None,
 ) -> dict:
     """順序を変えるとマージできる件数が変わるのかを実測で確かめる。
 
@@ -260,19 +278,32 @@ def probe_order_sensitivity(
 
     シミュレーション 1 本は O(n) 回の merge-tree で数十 ms なので、
     数十通り試しても問題にならない。
+
+    :param baseline: `base_order` の Simulation が既にあるなら渡す。
+        呼び出し側は同じ順序をプリセットの検証で流しているので、
+        既算のものを渡せば 1 本まるごと省ける。
     """
     import random
 
+    # 乱数は先に使い切る（並列実行でも消費順を固定する）。
     rng = random.Random(seed)
-    baseline = simulate(repo, line_oid, base_order, candidates)
-    best = worst = baseline.merged
-    best_order = list(base_order)
-
     pool = [p for p in base_order if p in candidates]
+    trial_orders: list[list[str]] = []
     for _ in range(trials):
         shuffled = pool[:]
         rng.shuffle(shuffled)
-        s = simulate(repo, line_oid, shuffled, candidates)
+        trial_orders.append(shuffled)
+
+    if baseline is None:
+        baseline = simulate(repo, line_oid, base_order, candidates)
+    best = worst = baseline.merged
+    best_order = list(base_order)
+
+    sims = parallel.imap(
+        lambda o: simulate(repo, line_oid, o, candidates), trial_orders
+    )
+    # 投入順に畳む（完了順にすると同点のときの best_order が揺れる）
+    for shuffled, s in zip(trial_orders, sims):
         if s.merged > best:
             best, best_order = s.merged, shuffled
         worst = min(worst, s.merged)

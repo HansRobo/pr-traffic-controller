@@ -16,22 +16,12 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .mergetree import EXIT_CLEAN, EXIT_CONFLICT, MergeTreeError, MergeTreeResult, parse
 
 MIN_GIT_VERSION = (2, 40)
-
-#: 合成コミットを作るために必要。実在の人物に見えないよう固定値を使う。
-_COMMIT_ENV = {
-    "GIT_AUTHOR_NAME": "pr-traffic-controller",
-    "GIT_AUTHOR_EMAIL": "pr-traffic-controller@invalid",
-    "GIT_COMMITTER_NAME": "pr-traffic-controller",
-    "GIT_COMMITTER_EMAIL": "pr-traffic-controller@invalid",
-    "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00",
-    "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00",
-}
 
 
 class GitVersionError(RuntimeError):
@@ -93,6 +83,12 @@ class Repo:
 
     path: Path
     binary: str = ""
+
+    #: `changed_hunks` の結果。キーは不変な git オブジェクトなので永続に有効。
+    #: ペアワイズ解析は同じ (line, landing_tree, path) を候補ごとに n-1 回
+    #: 問い合わせるため、これが無いと O(n²) 回の `git diff -U0` が走る。
+    #: ロックは要らない —— dict 操作は atomic で、重複計算しても結果は同じ。
+    _hunks: dict = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.path = Path(self.path)
@@ -185,12 +181,6 @@ class Repo:
         """
         return self.merge_tree(merge_base=line, ours=tree_a, theirs=tree_b)
 
-    def commit_tree(self, tree: str, parent: str, message: str = "sim") -> str:
-        """逐次シミュレーション用の合成コミットを作る。"""
-        return self.run(
-            "commit-tree", tree, "-p", parent, "-m", message, env=_COMMIT_ENV
-        ).strip()
-
     # -- diff -----------------------------------------------------------
 
     def changed_files(self, base: str, target: str) -> frozenset[str]:
@@ -235,7 +225,18 @@ class Repo:
         行範囲は **base 側（pre-image）** を返す。異なる PR の範囲を
         比較するには座標系を揃える必要があり、それぞれの PR 自身の
         ベースで取った範囲同士を比べても意味が無い。
+
+        結果は `_hunks` にメモ化する（同じ問いがペアの数だけ繰り返される）。
         """
+        key = (base, target, path)
+        cached = self._hunks.get(key)
+        if cached is not None:
+            return cached
+        hunks = self._changed_hunks_uncached(base, target, path)
+        self._hunks[key] = hunks
+        return hunks
+
+    def _changed_hunks_uncached(self, base: str, target: str, path: str) -> list[Hunk]:
         out = self.run("diff", "-U0", "--no-color", base, target, "--", path, check=False)
         hunks: list[Hunk] = []
         for line in out.splitlines():
@@ -253,35 +254,3 @@ class Repo:
         return hunks
 
 
-def clone(url: str, dest: Path, *, binary: str | None = None) -> Repo:
-    """完全 clone する。
-
-    `--filter=blob:none` は使わない。merge-tree が blob をオンデマンドで
-    取得するため実測で桁違いに遅くなる（対象リポジトリは 69MB / 2.7 秒）。
-    `--no-checkout` は安全 —— merge-tree は index も worktree も触らない。
-    """
-    dest = Path(dest)
-    b = binary or _git_binary()
-    subprocess.run(
-        [b, "clone", "--quiet", "--no-checkout", url, str(dest)],
-        check=True,
-        capture_output=True,
-    )
-    return Repo(dest, binary=b)
-
-
-def fetch_pull_requests(repo: Repo, remote: str, namespace: str) -> int:
-    """`refs/pull/*/head` と `refs/heads/*` をまとめて取得する。
-
-    フォークの PR head は upstream の `refs/pull/*` には存在しないので、
-    フォークごとにこれを呼ぶ必要がある。
-    """
-    repo.run(
-        "fetch",
-        "--quiet",
-        remote,
-        f"+refs/pull/*/head:refs/remotes/{namespace}-pr/*",
-        f"+refs/heads/*:refs/remotes/{namespace}-br/*",
-    )
-    out = repo.run("for-each-ref", "--format=%(refname)", f"refs/remotes/{namespace}-pr")
-    return len([x for x in out.splitlines() if x])
