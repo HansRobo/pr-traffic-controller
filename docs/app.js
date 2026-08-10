@@ -116,13 +116,15 @@ function prCard(id, { step = null, note = null, reasons = null } = {}) {
       : null,
   );
 
+  // バッジはひとかたまりにして折り返す。個別に並べると flex 行の中で
+  // タイトルと幅を奪い合い、タイトルが潰れる。
   return el(
     "div",
     { class: cls },
     step !== null ? el("span", { class: "step-no" }, step) : null,
     el("span", { class: "num" }, prOpenButton(id)),
     body,
-    ...prBadges(pr),
+    el("span", { class: "pr-badges" }, ...prBadges(pr)),
     el("span", { class: "author" }, pr.author),
   );
 }
