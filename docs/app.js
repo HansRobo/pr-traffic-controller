@@ -84,6 +84,54 @@ function writeHash() {
 
 // --- 部品 --------------------------------------------------------------
 
+// --- GitHub 風のアイコン ---------------------------------------------
+// Pages 配信なので外部画像（アバター）を読める。読めなかった場合に
+// 崩れないよう、代替としてイニシャルの丸を出す。
+
+/** PR を表すアイコン。Draft かどうかで見分けられるようにする。 */
+function prIcon(pr) {
+  const draft = pr && pr.is_draft;
+  const path = draft
+    // git-pull-request-draft
+    ? "M3.25 1a2.25 2.25 0 0 1 .75 4.372v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 3.25 1Zm9.5 14a2.25 2.25 0 1 1 0-4.5 2.25 2.25 0 0 1 0 4.5ZM12 2.5a.75.75 0 1 1 1.5 0 .75.75 0 0 1-1.5 0Zm.75 3.5a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 12.75 6Z"
+    // git-pull-request
+    : "M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z";
+  const n = svg("svg", {
+    class: "icon pr-icon" + (draft ? " draft" : ""),
+    viewBox: "0 0 16 16", width: 14, height: 14, "aria-hidden": "true", focusable: "false",
+  }, svg("path", { d: path, fill: "currentColor" }));
+  return n;
+}
+
+/** PR 番号（アイコン付き）。 */
+function prRef(id) {
+  const pr = PR.get(id);
+  return el("span", { class: "pr-ref" }, prIcon(pr), shortId(id));
+}
+
+/** 著者。アバター画像 + ログイン名。 */
+function authorChip(login, avatarUrl, { compact = false } = {}) {
+  const src = avatarUrl || (login && login !== "(unknown)"
+    ? `https://github.com/${encodeURIComponent(login)}.png?size=48` : "");
+  const initial = (login || "?").replace(/^[^A-Za-z0-9]*/, "").charAt(0).toUpperCase() || "?";
+  const fallback = el("span", { class: "avatar avatar-fallback", "aria-hidden": "true" }, initial);
+  const chip = el("span", { class: "author-chip", title: login });
+  if (src) {
+    const img = el("img", {
+      class: "avatar", src, alt: "", loading: "lazy", width: 18, height: 18,
+      // 画像が出せない環境ではイニシャルに差し替える
+      onerror: () => { img.replaceWith(fallback); },
+    });
+    chip.append(img);
+  } else {
+    chip.append(fallback);
+  }
+  if (!compact) chip.append(el("span", { class: "author-name" }, login));
+  return chip;
+}
+
+
+
 function prBadges(pr) {
   const out = [];
   if (pr.review_decision === "APPROVED") out.push(el("span", { class: "badge approved" }, "✓ Approved"));
@@ -133,20 +181,21 @@ function prCard(id, { step = null, note = null, reasons = null } = {}) {
       },
     },
     step !== null ? el("span", { class: "step-no" }, step) : null,
-    el("span", { class: "num" }, shortId(id)),
+    el("span", { class: "num" }, prRef(id)),
     body,
     el("span", { class: "pr-badges" }, ...prBadges(pr)),
-    el("span", { class: "author" }, pr.author),
+    el("span", { class: "author" }, authorChip(pr.author, pr.author_avatar_url)),
   );
 }
 
 /** PR 番号のボタン。ページ遷移させず、サイドパネルで開く。 */
 function prOpenButton(id, label = null) {
+  const pr = PR.get(id);
   return el("button", {
     class: "pr-open",
-    title: "詳細をパネルで開く",
+    title: (pr ? pr.title + " — " : "") + "詳細をパネルで開く",
     onclick: (e) => { e.stopPropagation(); openPanel(id); },
-  }, label ?? shortId(id));
+  }, label ?? [prIcon(pr), shortId(id)]);
 }
 
 function levelChip(level) {
@@ -394,7 +443,15 @@ function viewCluster() {
   root.append(el("p", { class: "hint" },
     "このクラスタの中でだけ順序が問題になります。他のクラスタや独立PRとは"
     + "互いに干渉しないので、どの順番でマージしても構いません。"
-    + (authors.length > 1 ? `　関係者: ${authors.join(", ")}` : "")));
+  ));
+  if (authors.length) {
+    const who = el("div", { class: "filters" }, el("span", { class: "small muted" }, "関係者:"));
+    for (const a of authors) {
+      const some = members.map((m) => PR.get(m)).find((x) => x && x.author === a);
+      who.append(authorChip(a, some && some.author_avatar_url));
+    }
+    root.append(who);
+  }
 
   // グラフ
   root.append(el("div", { class: "panel" },
@@ -519,7 +576,8 @@ function prLink(id) {
     prOpenButton(id),
     pr.is_draft ? el("span", { class: "badge draft" }, "D") : null,
     pr.review_decision === "APPROVED" ? el("span", { class: "badge approved" }, "✓") : null,
-    el("div", { class: "small muted" }, pr.title.slice(0, 46)));
+    el("div", { class: "small muted" }, pr.title.slice(0, 46)),
+    el("div", {}, authorChip(pr.author, pr.author_avatar_url)));
 }
 
 // --- ビュー: スタック --------------------------------------------------
@@ -598,7 +656,12 @@ function viewMine() {
   const sel = el("select", { onchange: (e) => { state.author = e.target.value; render(); } },
     el("option", { value: "" }, "— 著者を選択 —"),
     ...authors.map((a) => el("option", { value: a, selected: a === state.author }, a)));
-  root.append(el("div", { class: "filters" }, el("label", {}, "著者", sel)));
+  const who = el("span", {});
+  if (state.author) {
+    const me = DATA.pull_requests.find((p) => p.author === state.author);
+    who.append(authorChip(state.author, me && me.author_avatar_url));
+  }
+  root.append(el("div", { class: "filters" }, el("label", {}, "著者", sel), who));
 
   if (!state.author) {
     root.append(el("div", { class: "empty" }, "著者を選ぶと、自分に関係する部分だけが表示されます。"));
@@ -725,8 +788,8 @@ function viewTable() {
     tb.append(el("tr", {},
       el("td", { class: "num" }, rank.get(p.id) ?? "—"),
       el("td", { class: "num" }, prOpenButton(p.id)),
-      el("td", {}, p.title, " ", ...prBadges(p)),
-      el("td", {}, p.author),
+      el("td", {}, p.title, " ", el("span", { class: "pr-badges" }, ...prBadges(p))),
+      el("td", {}, authorChip(p.author, p.author_avatar_url)),
       el("td", { class: "small" }, p.review_decision),
       el("td", { class: "num" }, `+${p.additions}/-${p.deletions}`),
       el("td", { class: "num" }, metrics[p.id]?.blocks ?? 0),
@@ -947,7 +1010,7 @@ function prDetail(id) {
         el("td", {}, levelChip(r.level)),
         el("td", {}, prOpenButton(r.other),
           el("div", { class: "small muted" }, other ? other.title.slice(0, 44) : ""),
-          other ? el("div", { class: "small muted" }, other.author) : null),
+          other ? el("div", {}, authorChip(other.author, other.author_avatar_url)) : null),
         el("td", { class: "small" },
           (r.conflict_files || []).map((f) =>
             el("div", {}, el("code", {}, f.path),
@@ -1032,9 +1095,10 @@ function renderPanel() {
   panel.replaceChildren(
     el("header", {},
       el("div", { class: "grow" },
-        el("div", { class: "mono small muted" }, pr.id),
+        el("div", { class: "mono small muted" }, prRef(pr.id), " ", pr.repo),
         el("h2", {}, pr.title),
-        el("div", { class: "pr-badges" }, ...prBadges(pr))),
+        el("div", { class: "pr-badges" },
+          authorChip(pr.author, pr.author_avatar_url), ...prBadges(pr))),
       el("button", {
         title: "このPRだけのページを開く",
         onclick: () => { state.view = "pr"; render(); },
@@ -1063,9 +1127,10 @@ function viewPr() {
 
   root.append(el("div", { class: "panel" },
     el("h3", {},
-      el("span", { class: "mono muted" }, pr.id), "　",
+      el("span", { class: "mono muted" }, prRef(pr.id)), "　",
       el("strong", {}, pr.title),
-      el("span", { class: "pr-badges" }, ...prBadges(pr)),
+      el("span", { class: "pr-badges" },
+        authorChip(pr.author, pr.author_avatar_url), ...prBadges(pr)),
       el("span", { class: "head-spacer" }),
       el("a", { class: "btn", href: pr.url, target: "_blank", rel: "noopener" }, "GitHub ↗")),
     el("div", { class: "panel-body" }, ...prDetail(state.pr))));

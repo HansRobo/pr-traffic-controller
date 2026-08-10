@@ -359,3 +359,30 @@ ul.tight li { margin: 2px 0; }
 .pr .num { user-select: none; }
 .side-panel header .head-spacer { display: none; }
 .panel > h3 .head-spacer { flex: 1 1 auto; }
+
+/* --- アイコン・アバター -------------------------------------------- */
+.icon { vertical-align: -2px; flex: 0 0 auto; }
+.pr-icon { color: var(--ok); }
+.pr-icon.draft { color: var(--ink-3); }
+
+.pr-ref {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--mono); font-size: 12px; white-space: nowrap;
+}
+
+.author-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--ink-2); white-space: nowrap; max-width: 100%;
+}
+.author-name { overflow: hidden; text-overflow: ellipsis; }
+.avatar {
+  width: 18px; height: 18px; border-radius: 50%; flex: 0 0 auto;
+  background: var(--surface-2); border: 1px solid var(--border);
+  object-fit: cover;
+}
+.avatar-fallback {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; color: var(--ink-2); line-height: 1;
+}
+.pr-open { display: inline-flex; align-items: center; gap: 4px; }
+.side-panel header .author-chip { color: var(--ink); }

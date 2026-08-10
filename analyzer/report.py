@@ -128,6 +128,7 @@ def build(
             "title": pr.title,
             "url": pr.url,
             "author": pr.author,
+            "author_avatar_url": pr.author_avatar_url,
             "kind": "external_pr" if pr.repo != target else "pr",
             "is_cross_repository": pr.is_cross_repository,
             "head": {

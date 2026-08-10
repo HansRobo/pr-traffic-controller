@@ -23,7 +23,7 @@ query($owner:String!, $name:String!, $endCursor:String) {
       nodes {
         number title url isDraft createdAt updatedAt
         additions deletions changedFiles
-        author { login }
+        author { login avatarUrl }
         mergeable
         reviewDecision
         baseRefName baseRepository { nameWithOwner }
@@ -107,6 +107,7 @@ def fetch_pull_requests(repo: str) -> list[PullRequest]:
                 title=n["title"],
                 url=n["url"],
                 author=(n.get("author") or {}).get("login", "(unknown)"),
+                author_avatar_url=(n.get("author") or {}).get("avatarUrl", ""),
                 head_repo=head_repo,
                 head_branch=n["headRefName"],
                 head_oid=n["headRefOid"],
