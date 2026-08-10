@@ -983,20 +983,9 @@ function viewStacks() {
 
 function viewMine() {
   const root = el("div");
-  const authors = [...new Set(DATA.pull_requests.map((p) => p.author))].sort();
-
-  const sel = el("select", { onchange: (e) => { state.author = e.target.value; render(); } },
-    el("option", { value: "" }, "— 著者を選択 —"),
-    ...authors.map((a) => el("option", { value: a, selected: a === state.author }, a)));
-  const who = el("span", {});
-  if (state.author) {
-    const me = DATA.pull_requests.find((p) => p.author === state.author);
-    who.append(authorChip(state.author, me && me.author_avatar_url));
-  }
-  root.append(el("div", { class: "filters" }, el("label", {}, "著者", sel), who));
-
   if (!state.author) {
-    root.append(el("div", { class: "empty" }, "著者を選ぶと、自分に関係する部分だけが表示されます。"));
+    root.append(el("div", { class: "empty" },
+      "上の「著者」で自分を選んでください。"));
     return root;
   }
 
@@ -1610,8 +1599,45 @@ function viewPr() {
 
 const VIEWS = { board: viewBoard, cluster: viewCluster, pr: viewPr, files: viewFiles, conflicts: viewConflicts, stacks: viewStacks, mine: viewMine, table: viewTable };
 
+/** 全ビューに効く絞り込み。
+ *
+ *  以前は著者フィルタを「自分視点」の中だけに置いていたが、その値は
+ *  干渉一覧・ファイル・PR一覧にも効いていた。切り替えられる場所と
+ *  効く場所がずれていると、なぜ件数が減っているのか分からなくなる。
+ *  効く範囲と同じだけ見える位置に置く。 */
+function renderGlobalFilters() {
+  const host = $("#global-filters");
+  if (!host || !DATA) return;
+  const authors = [...new Set(DATA.pull_requests.map((p) => p.author))].sort();
+  const me = state.author && DATA.pull_requests.find((p) => p.author === state.author);
+
+  host.replaceChildren(
+    el("label", {}, "著者",
+      el("select", {
+        "aria-label": "著者で絞り込む",
+        onchange: (e) => { state.author = e.target.value; render(); },
+      },
+        el("option", { value: "" }, "すべて"),
+        ...authors.map((a) => el("option", { value: a, selected: a === state.author }, a)))),
+    me ? authorChip(state.author, me.author_avatar_url) : null,
+    state.author
+      ? el("button", { onclick: () => { state.author = ""; render(); } }, "絞り込みを解除")
+      : null,
+    el("label", {},
+      el("input", {
+        type: "checkbox", checked: state.hideDraft,
+        onchange: (e) => { state.hideDraft = e.target.checked; render(); },
+      }), "Draft を隠す"),
+    state.author || state.hideDraft
+      ? el("span", { class: "filter-note" },
+          "この絞り込みはすべてのタブに効いています")
+      : el("span", { class: "small muted" }, "すべてのタブに効きます"),
+  );
+}
+
 function render() {
   writeHash();
+  renderGlobalFilters();
   for (const b of document.querySelectorAll("#view-tabs button")) {
     // クラスタ詳細は推奨マージ順の下位ページなので、タブはそちらを選択状態にする
     const active = state.view === "cluster" ? "board" : state.view;
@@ -1641,6 +1667,7 @@ function setupChrome() {
   sel.addEventListener("change", async (e) => {
     state.repo = e.target.value;
     state.line = null;
+    // 対象リポジトリが変われば著者の顔ぶれも変わるので、そこだけは解除する
     state.author = "";
     await loadAnalysis();
     setupLines();

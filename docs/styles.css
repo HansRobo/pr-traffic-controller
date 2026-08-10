@@ -516,3 +516,15 @@ ul.tight li { margin: 2px 0; }
   display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
   padding: 10px 12px; text-align: left; min-width: 190px;
 }
+
+/* --- 全ビューに効く絞り込み ------------------------------------------ */
+/* 効く範囲と同じだけ見える位置に置く。特定のタブの中に隠すと、
+   他のタブで件数が減っている理由が分からなくなる。 */
+.global-filters {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 9px 12px; margin: 0 0 18px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface-2); font-size: 13px;
+}
+.global-filters label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); }
+.filter-note { color: var(--warning); font-size: 12px; font-weight: 600; }
