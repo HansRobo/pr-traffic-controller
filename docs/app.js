@@ -1349,11 +1349,20 @@ function interferenceGraph(ids, { height = 300 } = {}) {
   );
   // スタックは作者が意図した依存で、このビューアが解決を助けたい
   // 「意図しない干渉」ではない。文脈として薄く描き、消せるようにする。
+  //
+  // `stack.ancestors` は推移的な祖先すべてを持つ。そのまま辺にすると
+  // A→B→C→D の鎖で 6 本描かれてしまう（A→C や A→D まで引かれる）。
+  // 必要なのは直接の親だけなので、鎖の中で最も近い祖先 1 本に絞る。
   const stacks = [];
   if (state.showStack !== false) {
     for (const id of nodes) {
-      for (const anc of (PR.get(id)?.stack.ancestors) || []) {
-        if (idx.has(anc)) stacks.push({ from: anc, to: id });
+      const ancestors = (PR.get(id) || {}).stack?.ancestors || [];
+      // ancestors はルート側が先頭。表示されている中で最も近いものが直接の親。
+      for (let i = ancestors.length - 1; i >= 0; i--) {
+        if (idx.has(ancestors[i])) {
+          stacks.push({ from: ancestors[i], to: id });
+          break;
+        }
       }
     }
   }
@@ -1859,8 +1868,12 @@ function setupChrome() {
     setupLines();
     render();
   });
-  $("#repo-name").textContent =
-    `fork: ${DATA.source.forks_scanned.join(", ") || "なし"}`;
+  const forks = DATA.source.forks_scanned || [];
+  const nameEl = $("#repo-name");
+  nameEl.textContent = forks.length
+    ? `fork ${forks.length} 件を追跡`
+    : "fork なし";
+  nameEl.title = forks.join("\n");
 
   setupLines();
 
