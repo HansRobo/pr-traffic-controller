@@ -21,6 +21,7 @@ const state = {
   hideDraft: false,
   cluster: null,   // クラスタ詳細で見ているクラスタ
   file: null,      // ファイルビューで開いているファイル
+  fileDir: null,   // ファイルビューで絞り込んでいるディレクトリ
   fileQuery: "",
   filesSharedOnly: true,
   filesConflictOnly: false,
@@ -66,7 +67,7 @@ function relativeTime(iso) {
 
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
-  for (const k of ["view", "repo", "line", "author", "preset", "cluster", "pr", "file"]) {
+  for (const k of ["view", "repo", "line", "author", "preset", "cluster", "pr", "file", "fileDir"]) {
     if (p.get(k)) state[k] = p.get(k);
   }
   state.hideDraft = p.get("hideDraft") === "1";
@@ -88,6 +89,7 @@ function writeHash() {
   if (state.hideDraft) p.set("hideDraft", "1");
   if (state.cluster) p.set("cluster", state.cluster);
   if (state.file) p.set("file", state.file);
+  if (state.fileDir) p.set("fileDir", state.fileDir);
   if (state.pr) p.set("pr", state.pr);
   if (state.minLevel !== 2) p.set("minLevel", String(state.minLevel));
   history.replaceState(null, "", "#" + p.toString());
@@ -829,13 +831,32 @@ function viewFiles() {
       el("th", {}, "ディレクトリ"), el("th", { class: "num" }, "PR"),
       el("th", { class: "num" }, "ファイル"), el("th", { class: "num" }, "衝突"))),
     el("tbody", {}, ...dirRows.map(([name, d]) =>
-      el("tr", {},
+      el("tr", {
+        class: "dir-row" + (state.fileDir === name ? " selected" : ""),
+        role: "button",
+        tabindex: "0",
+        title: `${name} 配下だけに絞り込む`,
+        onclick: () => {
+          state.fileDir = state.fileDir === name ? null : name;
+          renderFileList();
+          syncDirSelection();
+        },
+        onkeydown: (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            state.fileDir = state.fileDir === name ? null : name;
+            renderFileList();
+            syncDirSelection();
+          }
+        },
+      },
         el("td", {}, el("code", {}, name === "(ルート)" ? name : name + "/")),
         el("td", { class: "num" }, d.prs.size),
         el("td", { class: "num" }, d.files),
         el("td", { class: "num" }, d.conflicts)))));
   root.append(el("div", { class: "panel" },
-    el("h3", {}, "混んでいる領域", el("span", { class: "muted" }, "— トップレベルディレクトリ別")),
+    el("h3", {}, "混んでいる領域",
+      el("span", { class: "muted" }, "— トップレベルディレクトリ別。行をクリックすると絞り込めます")),
     el("div", { class: "table-scroll" }, dirTable)));
 
   const listHost = el("div", { class: "panel" },
@@ -849,6 +870,11 @@ function viewFiles() {
     const q = (state.fileQuery || "").toLowerCase();
     let rows = [...index.values()]
       .filter((r) => !q || r.path.toLowerCase().includes(q))
+      .filter((r) => {
+        if (!state.fileDir) return true;
+        const top = r.path.includes("/") ? r.path.split("/")[0] : "(ルート)";
+        return top === state.fileDir;
+      })
       .filter((r) => r.prs.size > 0)
       .filter((r) => state.filesSharedOnly === false || r.prs.size > 1)
       .filter((r) => !state.filesConflictOnly || r.conflicts.length)
@@ -859,9 +885,18 @@ function viewFiles() {
         || a.path.localeCompare(b.path));
 
     const head = $("#file-list-head");
-    if (head) head.replaceChildren(
+    if (head) head.replaceChildren(...[
       document.createTextNode("ファイル"),
-      el("span", { class: "muted" }, `— ${rows.length}件`));
+      el("span", { class: "muted" }, `— ${rows.length}件`),
+      state.fileDir
+        ? el("span", { class: "dir-chip" },
+            el("code", {}, state.fileDir === "(ルート)" ? state.fileDir : state.fileDir + "/"),
+            el("button", {
+              title: "ディレクトリの絞り込みを解除",
+              onclick: (e) => { e.stopPropagation(); state.fileDir = null; renderFileList(); syncDirSelection(); },
+            }, "✕"))
+        : null,
+    ].filter(Boolean));
 
     host.replaceChildren();
     if (!rows.length) { host.append(el("div", { class: "empty" }, "該当なし")); return; }
@@ -929,6 +964,17 @@ function viewFiles() {
     if (rows.length > 200) {
       host.append(el("p", { class: "hint" }, `${rows.length - 200} 件を省略しました。パスで絞り込んでください。`));
     }
+  }
+
+  function syncDirSelection() {
+    const rows = dirTable.querySelectorAll("tr.dir-row");
+    dirRows.forEach(([name], i) => {
+      const tr = rows[i];
+      if (!tr) return;
+      if (state.fileDir === name) tr.classList.add("selected");
+      else tr.classList.remove("selected");
+    });
+    writeHash();
   }
 
   // 初回描画は DOM 挿入後に行う
@@ -1822,7 +1868,7 @@ function setupChrome() {
     b.addEventListener("click", () => {
       state.view = b.dataset.view;
       state.cluster = null;
-      if (b.dataset.view !== "files") state.file = null;
+      if (b.dataset.view !== "files") { state.file = null; state.fileDir = null; }
       render();
     });
   }

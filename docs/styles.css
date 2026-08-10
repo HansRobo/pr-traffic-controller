@@ -549,3 +549,16 @@ details.loc[open] > summary { border-bottom: 1px solid var(--border); border-rad
 .seq-row.conflict-light .seq-mark { color: var(--ink-2); }
 .graph .edge.comment-only { stroke-dasharray: 2 3; stroke-width: 1.1; }
 .legend-comment { border-top: 2px dotted var(--l2) !important; }
+
+/* ディレクトリ行での絞り込み */
+tr.dir-row { cursor: pointer; }
+tr.dir-row:hover > td { background: var(--surface-2); }
+tr.dir-row.selected > td { background: var(--ok-bg); }
+tr.dir-row.selected > td:first-child { box-shadow: inset 3px 0 0 var(--ok); }
+tr.dir-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.dir-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 4px 1px 6px; border: 1px solid var(--ok); border-radius: 5px;
+  background: var(--ok-bg); font-size: 12px;
+}
+.dir-chip button { padding: 0 4px; border: none; background: none; font-size: 12px; }
