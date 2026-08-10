@@ -15,7 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import dag, github, interference, order, report, simulate
+from . import dag, filechanges, github, interference, order, report, simulate
 from .gitops import GitVersionError, MergeTreeError, Repo, assert_git_version, clone
 from .model import Candidate, PullRequest
 
@@ -206,6 +206,21 @@ def run(
                 print(f"  {name}: {n} 件 -> {n*(n-1)//2} ペア", file=sys.stderr)
             results[name] = interference.analyze_line(repo, line_oids[name], cands)
 
+        # --- ファイル・関数ごとの変更 -----------------------------------
+        # 「この場所を、関係する PR がそれぞれどう変えようとしているか」。
+        # ペア単位の干渉一覧では 3 件以上が同じ場所を触るときに全体像が
+        # 掴めないので、軸を場所側に反転させたものを別に持つ。
+        if verbose:
+            print("ファイル・関数ごとの変更を収集中 ...", file=sys.stderr)
+        file_changes = {}
+        for name in line_names:
+            conflicted = frozenset(
+                f.path for p in results[name] for f in p.conflict_files
+            )
+            file_changes[name] = filechanges.build(
+                repo, line_oids[name], by_line[name], conflicted_paths=conflicted
+            )
+
         # --- 順序推奨 ---------------------------------------------------
         if verbose:
             print("マージ順を計算中 ...", file=sys.stderr)
@@ -272,6 +287,7 @@ def run(
             pairs=results,
             orders=orders,
             skipped=skipped,
+            file_changes=file_changes,
             duration=time.time() - started,
             repo=repo,
         )

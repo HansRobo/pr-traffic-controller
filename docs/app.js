@@ -621,6 +621,67 @@ function viewCluster() {
 // 見えないため。関数の粒度は、干渉解析が出す「双方が変更した関数」から
 // 組み立てる（＝2件以上の PR が触った関数だけが並ぶ）。
 
+/** 1 つの hunk を diff として描く（+/- 付き）。 */
+function changeHunk(h) {
+  const pre = el("div", { class: "diff" });
+  for (const [mark, body] of h.lines) {
+    const cls = mark === "+" ? "b" : mark === "-" ? "a" : "same";
+    pre.append(el("div", { class: "diff-line " + cls },
+      el("span", { class: "diff-mark" }, mark === " " ? " " : mark === "+" ? "＋" : "−"),
+      el("span", { class: "diff-text" }, body === "" ? " " : body)));
+  }
+  if (h.truncated) {
+    pre.append(el("div", { class: "diff-line trunc" },
+      el("span", { class: "diff-mark" }, " "),
+      el("span", { class: "diff-text" }, "…（以降省略）")));
+  }
+  return pre;
+}
+
+/** 場所（関数・ファイル）ごとに、そこを触る PR の変更を並べる。
+ *
+ *  ペア単位（A と B）で並べると、3 件以上が同じ場所を触るときに
+ *  1 対 1 の比較が組み合わせの数だけ並んで全体像が掴めない。
+ *  軸を場所側にして、関係する PR の変更を縦に積む。 */
+function changesByLocation(path, rows) {
+  // 関数ごとにまとめ直す（関数が取れないものは「トップレベル」へ）
+  const byFn = new Map();
+  for (const r of rows) {
+    for (const h of r.hunks) {
+      const key = h.function || "(トップレベル)";
+      if (!byFn.has(key)) byFn.set(key, []);
+      byFn.get(key).push({ pr: r.pr, hunk: h });
+    }
+  }
+
+  const out = el("div", {});
+  const entries = [...byFn.entries()].sort((a, b) => b[1].length - a[1].length);
+  for (const [fn, items] of entries) {
+    const prs = [...new Set(items.map((i) => i.pr))];
+    const body = el("div", { class: "loc-body" });
+    for (const pr of prs) {
+      const meta = PR.get(pr);
+      body.append(el("div", { class: "loc-pr" },
+        el("div", { class: "loc-pr-head" },
+          prOpenButton(pr),
+          meta ? authorChip(meta.author, meta.author_avatar_url) : null,
+          meta ? el("span", { class: "small muted" }, meta.title.slice(0, 52)) : null),
+        ...items.filter((i) => i.pr === pr).map((i) =>
+          el("div", { class: "loc-hunk" },
+            el("div", { class: "loc-hunk-loc small muted" }, `${path}:${i.hunk.line}`),
+            changeHunk(i.hunk)))));
+    }
+    out.append(el("details", { class: "loc", open: entries.length <= 2 },
+      el("summary", {},
+        el("code", { class: "fn-name" }, fn),
+        el("span", { class: "badge" }, `${prs.length} PR がこの場所を変更`),
+        el("span", { class: "file-authors" },
+          ...authorsOf(prs).slice(0, 6).map(([a, av]) => authorChip(a, av, { compact: true })))),
+      body));
+  }
+  return out;
+}
+
 function buildFileIndex() {
   const iv = DATA.interference[state.line] || { pairs: [] };
   const prs = DATA.pull_requests.filter((p) => p.line === state.line && p.changed_files);
@@ -761,38 +822,38 @@ function viewFiles() {
 
       const body = el("div", { class: "file-body" });
 
-      // 関数ごと（2件以上が触ったもの）
-      if (rec.functions.size) {
+      // 主役: この場所を、どの PR がどう変えようとしているか
+      const changes = (DATA.file_changes && DATA.file_changes[state.line] || {})[rec.path];
+      if (changes && changes.length) {
+        body.append(el("section", {},
+          el("h4", {}, "この場所を変更しようとしている PR"),
+          changesByLocation(rec.path, changes)));
+      } else if (rec.functions.size) {
+        // 差分を持っていない場合は、せめて関数名と PR の対応を出す
         const fl = el("div", {});
         for (const [fn, ids] of [...rec.functions.entries()].sort((a, b) => b[1].size - a[1].size)) {
           fl.append(el("div", { class: "fn-row" },
             el("code", { class: "fn-name" }, fn),
             el("span", { class: "small muted" }, `${ids.size} PR`),
-            el("span", { class: "fn-prs" },
-              ...[...ids].sort().map((id) => prOpenButton(id)))));
+            el("span", { class: "fn-prs" }, ...[...ids].sort().map((id) => prOpenButton(id)))));
         }
         body.append(el("section", {}, el("h4", {}, "双方が変更した関数・クラス"), fl));
       }
 
-      // このファイルで起きている衝突
+      // 衝突は要約だけ。詳しい 1 対 1 の比較は干渉一覧に任せる。
       if (rec.conflicts.length) {
         const cl = el("div", {});
         for (const c of rec.conflicts.sort((x, y) => y.level - x.level)) {
-          cl.append(el("div", { class: "fn-row conflict-row" },
-            el("div", { class: "fn-prs" },
-              levelChip(c.level),
-              c.structural ? el("span", { class: "badge warn" }, "構造") : null,
-              prOpenButton(c.a), el("span", { class: "muted" }, "↔"), prOpenButton(c.b)),
-            c.file && c.file.hunks && c.file.hunks.length
-              ? el("details", { class: "hunk-details" },
-                  el("summary", { class: "small" }, `衝突箇所を見る（${c.file.hunks.length}）`),
-                  conflictHunks(c.file, c.a, c.b))
-              : null));
+          cl.append(el("div", { class: "fn-row" },
+            levelChip(c.level),
+            c.structural ? el("span", { class: "badge warn" }, "構造") : null,
+            el("span", { class: "fn-prs" },
+              prOpenButton(c.a), el("span", { class: "muted" }, "↔"), prOpenButton(c.b))));
         }
-        body.append(el("section", {}, el("h4", {}, "このファイルで起きている衝突"), cl));
+        body.append(el("section", {},
+          el("h4", {}, `このファイルで実際に衝突しているペア（${rec.conflicts.length}）`), cl));
       }
 
-      // 触っている PR
       body.append(el("section", {},
         el("h4", {}, `このファイルを変更する PR（${rec.prs.size}件）`),
         ...[...rec.prs].sort().map((id) => prCard(id))));
@@ -1611,7 +1672,9 @@ function renderGlobalFilters() {
   const authors = [...new Set(DATA.pull_requests.map((p) => p.author))].sort();
   const me = state.author && DATA.pull_requests.find((p) => p.author === state.author);
 
-  host.replaceChildren(
+  // replaceChildren は el() と違って null を落とさず文字列 "null" にする。
+  // 条件付きの要素を渡すので、ここで確実に間引く。
+  host.replaceChildren(...[
     el("label", {}, "著者",
       el("select", {
         "aria-label": "著者で絞り込む",
@@ -1632,7 +1695,7 @@ function renderGlobalFilters() {
       ? el("span", { class: "filter-note" },
           "この絞り込みはすべてのタブに効いています")
       : el("span", { class: "small muted" }, "すべてのタブに効きます"),
-  );
+  ].filter(Boolean));
 }
 
 function render() {

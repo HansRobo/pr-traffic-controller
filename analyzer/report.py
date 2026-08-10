@@ -76,6 +76,7 @@ def build(
     pairs: dict[str, list[PairResult]],
     orders: dict,
     skipped: list[tuple[str, str]],
+    file_changes: dict,
     duration: float,
     repo: "Repo",
 ) -> dict:
@@ -310,6 +311,7 @@ def build(
         "actions": actions,
         "pull_requests": prs_out,
         "interference": interference_out,
+        "file_changes": file_changes,
         "orders": orders_out,
         "warnings": warnings_out,
         "stats": {

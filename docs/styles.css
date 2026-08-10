@@ -528,3 +528,17 @@ ul.tight li { margin: 2px 0; }
 }
 .global-filters label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); }
 .filter-note { color: var(--warning); font-size: 12px; font-weight: 600; }
+
+/* --- 場所ごとの変更 -------------------------------------------------- */
+details.loc { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 10px; }
+details.loc > summary {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 10px; background: var(--surface-2); border-radius: 6px;
+}
+details.loc[open] > summary { border-bottom: 1px solid var(--border); border-radius: 6px 6px 0 0; }
+.loc-body { padding: 8px 10px 4px; }
+.loc-pr { margin-bottom: 12px; }
+.loc-pr-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.loc-hunk { margin-bottom: 6px; }
+.loc-hunk-loc { padding: 2px 2px 3px; }
+.loc-hunk .diff { border: 1px solid var(--border); border-radius: 5px; }
