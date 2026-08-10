@@ -28,6 +28,7 @@ const state = {
   pr: null,        // サイドパネルで開いている PR
   minLevel: 2,     // グラフに出す干渉レベルの下限
   showStack: true, // 意図したスタック依存を文脈として描くか
+  graphScope: null, // グラフを 1 つのファイル・関数に絞る
 };
 
 let INDEX = null;
@@ -72,6 +73,11 @@ function readHash() {
   }
   state.hideDraft = p.get("hideDraft") === "1";
   if (p.get("minLevel")) state.minLevel = Number(p.get("minLevel"));
+  const scope = p.get("scope");
+  if (scope) {
+    const i = scope.indexOf(":");
+    if (i > 0) state.graphScope = { kind: scope.slice(0, i), value: scope.slice(i + 1) };
+  }
   if (state.file) {
     // 共有されたリンクで必ずその行が出るよう、絞り込みを合わせる
     state.fileQuery = state.file;
@@ -92,6 +98,7 @@ function writeHash() {
   if (state.fileDir) p.set("fileDir", state.fileDir);
   if (state.pr) p.set("pr", state.pr);
   if (state.minLevel !== 2) p.set("minLevel", String(state.minLevel));
+  if (state.graphScope) p.set("scope", state.graphScope.kind + ":" + state.graphScope.value);
   history.replaceState(null, "", "#" + p.toString());
 }
 
@@ -616,7 +623,7 @@ function viewCluster() {
     el("h3", {}, "干渉グラフ",
       el("span", { class: "muted" }, "— 上側の弧が意図しない干渉。ノードをクリックすると詳細が開きます")),
     el("div", { class: "panel-body" },
-      graphFilters(),
+      graphFilters(members),
       interferenceGraph(members, { height: 300 }))));
 
   // 推奨順
@@ -1311,6 +1318,57 @@ function viewTable() {
 //
 // 全部描くと密になるので、レベル下限・著者・PR 選択で絞れるようにする。
 
+/** グラフで「場所」を絞り込むための選択肢。
+ *  ファイルと、双方が触った関数を集める。 */
+function graphScopeOptions(ids) {
+  const iv = DATA.interference[state.line] || { pairs: [] };
+  const idset = new Set(ids);
+  const files = new Map();     // path -> 衝突しているペア数
+  const funcs = new Map();     // "path::fn" -> ペア数
+  for (const p of iv.pairs) {
+    if (!idset.has(p.a) || !idset.has(p.b)) continue;
+    for (const f of pairFiles(p)) {
+      if ((f.level || 0) >= state.minLevel) {
+        files.set(f.path, (files.get(f.path) || 0) + 1);
+      }
+      for (const w of f.warnings || []) {
+        for (const s of w.symbols || []) {
+          const key = f.path + "::" + s;
+          funcs.set(key, (funcs.get(key) || 0) + 1);
+        }
+      }
+    }
+  }
+  return { files, funcs };
+}
+
+/** ペアが、選んだ場所に関わっているか。 */
+function pairInScope(p) {
+  const sc = state.graphScope;
+  if (!sc) return true;
+  for (const f of pairFiles(p)) {
+    if (sc.kind === "file") {
+      if (f.path === sc.value && (f.level || 0) >= state.minLevel) return true;
+    } else {
+      const [path, fn] = sc.value.split("::");
+      if (f.path !== path) continue;
+      for (const w of f.warnings || []) {
+        if ((w.symbols || []).includes(fn)) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** ペアの中で、いま数えるべき衝突ファイル。場所を絞っていればその 1 つだけ。 */
+function scopedConflictFiles(p) {
+  const files = pairFiles(p).filter((f) => (f.level || 0) >= state.minLevel);
+  const sc = state.graphScope;
+  if (!sc) return files;
+  const path = sc.kind === "file" ? sc.value : sc.value.split("::")[0];
+  return files.filter((f) => f.path === path);
+}
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 const svg = (tag, attrs = {}, ...kids) => {
   const n = document.createElementNS(SVG_NS, tag);
@@ -1336,10 +1394,20 @@ function interferenceGraph(ids, { height = 300 } = {}) {
   const nodes = visiblePrs(ids).sort((a, b) => (rank.get(a) ?? 1e9) - (rank.get(b) ?? 1e9));
   const idx = new Map(nodes.map((id, i) => [id, i]));
 
-  const conflicts = iv.pairs.filter(
-    (p) => p.level !== undefined && p.level >= state.minLevel
-      && idx.has(p.a) && idx.has(p.b),
-  );
+  const conflicts = iv.pairs
+    .filter((p) => p.level !== undefined && idx.has(p.a) && idx.has(p.b))
+    .map((p) => ({ pair: p, files: scopedConflictFiles(p) }))
+    .filter((e) => e.files.length && pairInScope(e.pair))
+    .map((e) => ({
+      a: e.pair.a,
+      b: e.pair.b,
+      // 太さと色は「いま見ている範囲の」ファイルから決める
+      level: Math.max(...e.files.map((f) => f.level)),
+      count: e.files.length,
+      structural: e.files.some((f) => f.structural),
+      comment_only: e.files.every((f) => f.comment_only),
+      files: e.files,
+    }));
   // スタックは作者が意図した依存で、このビューアが解決を助けたい
   // 「意図しない干渉」ではない。文脈として薄く描き、消せるようにする。
   //
@@ -1386,19 +1454,32 @@ function interferenceGraph(ids, { height = 300 } = {}) {
 
   const focus = state.pr && idx.has(state.pr) ? state.pr : null;
   const touches = (a, b) => !focus || a === focus || b === focus;
+  // 場所を絞ったら、その場所に関わる PR だけを濃く出す
+  const inScope = new Set();
+  for (const c of conflicts) { inScope.add(c.a); inScope.add(c.b); }
 
   // 上: 衝突（無向）
   for (const c of conflicts) {
     const x1 = x(c.a), x2 = x(c.b);
     const span = Math.abs(x2 - x1);
     const r = Math.min(span / 2, midY - NH / 2 - 14);
-    const dir = -1;
+    // 何ファイルでぶつかっているかを線の太さで表す。等級だけでは
+    // 「1 ファイルだけ」と「16 ファイル」の区別が付かない。
+    const width = Math.min(1.2 + Math.log2(c.count) * 1.5, 7);
+    const breakdown = c.files
+      .slice(0, 6)
+      .map((f) => `  L${f.level}${f.structural ? "(構造)" : ""}${f.comment_only ? "(コメント)" : ""} ${f.path}`)
+      .join("\n");
     g.append(svg("path", {
       class: `edge lv${c.level}` + (c.comment_only ? " comment-only" : "")
         + (touches(c.a, c.b) ? "" : " dim"),
-      d: `M${x1},${midY + dir * (NH / 2)} A${span / 2},${r} 0 0,${x2 > x1 ? 1 : 0} ${x2},${midY + dir * (NH / 2)}`,
-    }, svg("title", {}, `${shortId(c.a)} ↔ ${shortId(c.b)} — L${c.level} 衝突`
-      + `（順序は「誰が rebase するか」を決めるだけ）`)));
+      "stroke-width": width,
+      d: `M${x1},${midY - NH / 2} A${span / 2},${r} 0 0,${x2 > x1 ? 1 : 0} ${x2},${midY - NH / 2}`,
+    }, svg("title", {},
+      `${shortId(c.a)} ↔ ${shortId(c.b)}\n`
+      + `${c.count} ファイルで衝突（最大 L${c.level}）\n${breakdown}`
+      + (c.files.length > 6 ? `\n  ほか ${c.files.length - 6} ファイル` : "")
+      + `\n順序は「誰が rebase するか」を決めるだけ`)));
   }
 
   // 下: スタック依存（有向）
@@ -1421,9 +1502,10 @@ function interferenceGraph(ids, { height = 300 } = {}) {
       pr?.is_draft ? "draft" : "",
       pr?.base_conflict ? "rebase" : "",
       focus === id ? "sel" : "",
-      focus && focus !== id
+      (focus && focus !== id
         && !conflicts.some((c) => (c.a === id && c.b === focus) || (c.b === id && c.a === focus))
-        && !stacks.some((s) => (s.from === id && s.to === focus) || (s.to === id && s.from === focus))
+        && !stacks.some((s) => (s.from === id && s.to === focus) || (s.to === id && s.from === focus)))
+      || (state.graphScope && !inScope.has(id))
         ? "dim" : "",
     ].join(" ");
     const cx = x(id);
@@ -1444,8 +1526,15 @@ function interferenceGraph(ids, { height = 300 } = {}) {
     el("span", {}, el("i", { style: "border-color: var(--l2)" }), "上側の弧 = 衝突（無向。順序は誰が払うかを決めるだけ）"),
     el("span", {}, el("i", { class: "legend-stack" }), "下側の矢印 = スタック依存（作者が意図した順序。干渉ではない）"),
     el("span", {}, el("i", { class: "legend-comment" }), "点線 = コメント・文書だけの衝突"),
+    el("span", {}, "線の太さ = ぶつかっているファイル数"),
     el("span", {}, "枠が緑 = Approved / 破線 = Draft / 赤 = 要rebase"),
   ));
+  if (state.graphScope) {
+    const sc = state.graphScope;
+    const label = sc.kind === "file" ? sc.value : sc.value.split("::")[1] + "（" + sc.value.split("::")[0] + "）";
+    wrap.append(el("p", { class: "hint" },
+      `${label} を巡る干渉だけを描いています（${conflicts.length} ペア）。`));
+  }
   if (focus) {
     wrap.append(el("p", { class: "hint" },
       `${shortId(focus)} に関係する辺だけを強調しています。`,
@@ -1455,7 +1544,7 @@ function interferenceGraph(ids, { height = 300 } = {}) {
 }
 
 /** グラフの絞り込み。全部出すと密になるので既定は L2 以上。 */
-function graphFilters() {
+function graphFilters(ids) {
   const row = el("div", { class: "filters" }, el("span", { class: "small muted" }, "グラフに出す干渉:"));
   for (const [lv, label] of [[1, "L1以上（同一ファイル含む）"], [2, "L2以上（実際に衝突）"], [3, "L3のみ（構造衝突）"]]) {
     row.append(el("button", {
@@ -1469,6 +1558,45 @@ function graphFilters() {
       type: "checkbox", checked: state.showStack !== false,
       onchange: (e) => { state.showStack = e.target.checked; render(); },
     }), "スタック依存も表示"));
+
+  if (ids && ids.length) {
+    const { files, funcs } = graphScopeOptions(ids);
+    const sc = state.graphScope;
+    const sel = el("select", {
+      "aria-label": "場所で絞り込む",
+      onchange: (e) => {
+        const v = e.target.value;
+        state.graphScope = v ? JSON.parse(v) : null;
+        render();
+      },
+    }, el("option", { value: "" }, "すべての場所"));
+
+    const fileOpts = [...files.entries()].sort((a, b) => b[1] - a[1]);
+    if (fileOpts.length) {
+      const grp = el("optgroup", { label: "ファイル" });
+      for (const [path, n] of fileOpts) {
+        const v = JSON.stringify({ kind: "file", value: path });
+        grp.append(el("option", { value: v, selected: sc && sc.kind === "file" && sc.value === path },
+          `${path}（${n} ペア）`));
+      }
+      sel.append(grp);
+    }
+    const funcOpts = [...funcs.entries()].sort((a, b) => b[1] - a[1]);
+    if (funcOpts.length) {
+      const grp = el("optgroup", { label: "双方が変更した関数" });
+      for (const [key, n] of funcOpts) {
+        const [path, fn] = key.split("::");
+        const v = JSON.stringify({ kind: "func", value: key });
+        grp.append(el("option", { value: v, selected: sc && sc.kind === "func" && sc.value === key },
+          `${fn}（${path.split("/").pop()}, ${n} ペア）`));
+      }
+      sel.append(grp);
+    }
+    row.append(el("label", {}, "場所", sel));
+    if (sc) {
+      row.append(el("button", { onclick: () => { state.graphScope = null; render(); } }, "場所の絞り込みを解除"));
+    }
+  }
   return row;
 }
 

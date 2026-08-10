@@ -72,6 +72,9 @@ for (const line of Object.keys(data.interference)) {
             // PR 選択あり/なしの両方（グラフの強調とパネル）
             for (const sel of [null, data.pull_requests.find(p=>p.line===line)?.id ?? null]) {
               m.state.pr = sel;
+              // グラフの場所絞り込みも一度は通す
+              const anyFile = (data.interference[line].pairs.find(p=>p.files?.length)?.files||[])[0];
+              m.state.graphScope = (cid && anyFile) ? { kind:"file", value:anyFile.path } : null;
               try { const n = fn(); if(!n) throw new Error("null 返却"); }
               catch(e){ fail++; console.log(`  ✗ ${line}/${preset}/${name}/c=${cid}/lv=${lv}: ${e.message}`); }
             }
@@ -80,7 +83,7 @@ for (const line of Object.keys(data.interference)) {
       }
       }
     }
-    m.state.cluster = null; m.state.pr = null; m.state.minLevel = 2; m.state.hideDraft = false;
+    m.state.cluster = null; m.state.pr = null; m.state.minLevel = 2; m.state.hideDraft = false; m.state.graphScope = null;
   }
 }
 console.log(`  ${entry.repo}: ${Object.keys(data.interference).length} ライン × ${Object.keys(data.orders[Object.keys(data.orders)[0]].presets).length} プリセット を検証`);
