@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR干渉ビューア</title>
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚦</text></svg>">
+</head>
+<body>
+<header>
+  <div class="head-inner">
+    <div class="brand">
+      🚦 PR干渉ビューア
+      <small id="repo-name">読み込み中…</small>
+    </div>
+    <label class="small muted" for="repo-select">対象
+      <select id="repo-select" aria-label="解析対象のリポジトリ"></select>
+    </label>
+    <div class="head-spacer"></div>
+    <div id="line-tabs" role="group" aria-label="統合ライン"></div>
+    <span class="freshness" id="freshness"></span>
+    <button id="theme-toggle" title="テーマ切替">◐</button>
+  </div>
+</header>
+
+<div class="wrap">
+  <div id="load-error"></div>
+
+  <nav class="tabs" id="view-tabs" role="tablist">
+    <button role="tab" data-view="board" aria-selected="true">推奨マージ順</button>
+    <button role="tab" data-view="conflicts" aria-selected="false">干渉一覧</button>
+    <button role="tab" data-view="stacks" aria-selected="false">スタック</button>
+    <button role="tab" data-view="mine" aria-selected="false">自分視点</button>
+    <button role="tab" data-view="table" aria-selected="false">PR一覧</button>
+  </nav>
+
+  <main id="view"></main>
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+[project]
+name = "pr-traffic-controller"
+version = "0.1.0"
+description = "滞留したPR群の相互干渉を可視化し、マージ順を推奨する"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "jsonschema>=4"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# live は実リポジトリの最新解析に依存し件数がぶれるので既定で除外する
+addopts = "-m 'not live'"
+markers = [
+    "requires_git: 実 git（>=2.40）を必要とするテスト",
+    "live: 実リポジトリにアクセスするテスト（通常は skip）",
+]

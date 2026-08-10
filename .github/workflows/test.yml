@@ -1,0 +1,43 @@
+name: テスト
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # git のバージョン差で出力形式が変わっていないかを検知する。
+        include:
+          - name: ubuntu (git 2.4x)
+            container: ""
+          - name: alpine/git (git 2.5x)
+            container: alpine/git:latest
+    name: ${{ matrix.name }}
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 依存を用意
+        run: |
+          if command -v apk >/dev/null; then apk add --quiet python3 py3-pip; fi
+          git --version
+          git config --global --add safe.directory '*'
+      - name: pytest
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q pytest
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /tmp/venv/bin/python -m pytest -q
+
+  viewer:
+    runs-on: ubuntu-latest
+    name: ビューアのスモークテスト
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --check docs/app.js
+      - run: node tools/smoke.mjs

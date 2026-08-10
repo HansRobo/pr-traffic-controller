@@ -1,0 +1,170 @@
+"""層1: パーサの純関数テスト。
+
+実 git が吐いたバイト列を固定してあるので、このテストは git を必要とせず
+どの環境でも走る（ローカルの git 2.34 でも可）。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from analyzer.mergetree import InfoMessage, MergeTreeResult, parse
+
+FIXTURES = Path(__file__).parent / "fixtures" / "mergetree"
+
+
+def load(name: str, *, clean: bool) -> MergeTreeResult:
+    return parse((FIXTURES / f"{name}.bin").read_bytes(), clean=clean)
+
+
+class TestCleanMerges:
+    def test_clean_without_info_section(self):
+        """情報節も空区切りレコードも無い、tree OID だけの出力。
+
+        変更ファイルが重ならないペアではこの形になる。パーサが
+        「空区切りレコードが必ずある」と仮定していると壊れる。
+        """
+        r = load("clean_no_info", clean=True)
+        assert r.clean
+        assert len(r.tree_oid) == 40
+        assert r.stages == {}
+        assert r.messages == ()
+        assert r.conflict_paths == frozenset()
+        assert not r.is_structural()
+
+    def test_clean_landing_tree_pair(self):
+        """着地tree同士のクリーンなマージ（同一ファイル・別領域 = L1）。"""
+        r = load("syn_clean_automerging", clean=True)
+        assert r.clean
+        assert r.stages == {}
+        assert r.conflict_paths == frozenset()
+
+
+class TestContentConflicts:
+    def test_content_conflict_has_all_stages(self):
+        """ステージ 1/2/3 が揃う内容衝突。"""
+        r = load("commit_form_mixed", clean=False)
+        assert not r.clean
+        assert r.conflict_paths == {"shared.py"}
+        assert r.stages["shared.py"] == {1, 2, 3}
+        # 内容衝突のみなので構造衝突ではない
+        assert not r.is_structural()
+
+    def test_auto_merging_records_are_not_conflicts(self):
+        """クリーンにマージされたファイルの Auto-merging を衝突と数えない。
+
+        情報節は「衝突リスト」ではない。全レコードを衝突として扱うと、
+        自動マージされただけのファイルまで衝突に数えてしまう。
+        """
+        r = load("commit_form_mixed", clean=False)
+        auto = [m for m in r.messages if m.type == "Auto-merging"]
+        assert {m.paths[0] for m in auto} == {"base.py", "shared.py"}
+        # base.py は自動マージされただけなので衝突ではない
+        assert "base.py" not in r.conflict_paths
+        assert r.conflict_paths == {"shared.py"}
+
+    def test_tree_form_matches_commit_form(self):
+        """bare tree OID を渡した形式でも同じ構造で読める。
+
+        ペアワイズ解析は着地tree（commit ではなく tree OID）同士を
+        マージするので、この形式が壊れると解析全体が壊れる。
+        """
+        tree = load("tree_form_mixed", clean=False)
+        commit = load("commit_form_mixed", clean=False)
+        assert not tree.clean
+        assert tree.conflict_paths == commit.conflict_paths
+        assert tree.stages == commit.stages
+        assert tree.is_structural() == commit.is_structural()
+
+
+class TestStructuralConflicts:
+    """ステージ集合による構造衝突の判定。
+
+    型フィールドの文字列一致では add/add を検出できない（型は
+    ``CONFLICT (contents)`` になる）ため、ここが分類の要になる。
+    """
+
+    def test_add_add_has_no_base_stage(self):
+        r = load("syn_conflict_add_add", clean=False)
+        assert r.stages["new.py"] == {2, 3}, "base(1) が無いのが add/add の印"
+        assert r.is_structural(), "L3 に分類されること"
+        # 型フィールドだけを見ると内容衝突に見えてしまうことの回帰テスト
+        assert r.conflict_types == {"CONFLICT (contents)"}
+        assert any("add/add" in m.message for m in r.messages)
+
+    def test_modify_delete(self):
+        r = load("syn_conflict_modify_delete", clean=False)
+        assert r.stages["base.py"] == {1, 3}
+        assert r.is_structural()
+        assert r.conflict_types == {"CONFLICT (modify/delete)"}
+
+    def test_rename_delete(self):
+        r = load("syn_conflict_rename_delete", clean=False)
+        assert r.stages["renamed.py"] == {1, 3}
+        assert r.is_structural()
+        assert r.conflict_types == {"CONFLICT (rename/delete)"}
+
+    def test_content_conflict_is_not_structural(self):
+        r = load("syn_conflict_content", clean=False)
+        assert r.stages["shared.py"] == {1, 2, 3}
+        assert not r.is_structural()
+
+
+class TestParserRobustness:
+    def test_empty_input_rejected(self):
+        with pytest.raises(ValueError):
+            parse(b"", clean=True)
+
+    def test_message_trailing_newline_stripped(self):
+        r = load("syn_conflict_add_add", clean=False)
+        for m in r.messages:
+            assert not m.message.endswith("\n")
+
+    def test_malformed_stage_line_rejected(self):
+        bad = b"a" * 40 + b"\0" + b"garbage-without-tab\0"
+        with pytest.raises(ValueError):
+            parse(bad, clean=False)
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "dir/with space.py",
+            "日本語/ファイル.py",
+            "weird\nnewline.py",
+            "tabs\tare\there.py",
+        ],
+    )
+    def test_paths_with_special_characters(self, path: str):
+        """`-z` ではパスはクオートされない。空白・改行・非ASCII を通す。
+
+        ステージ行はメタ情報とパスを最初の TAB で分けるので、パス自身が
+        TAB を含んでいても失われない（レコード境界は NUL であって TAB
+        ではないため、曖昧さは生じない）。
+        """
+        raw = path.encode()
+        data = (
+            b"t" * 40
+            + b"\0"
+            + b"100644 " + b"o" * 40 + b" 1\t" + raw + b"\0"
+            + b"\0"
+            + b"1\0" + raw + b"\0CONFLICT (contents)\0CONFLICT (contents): x\n\0"
+        )
+        r = parse(data, clean=False)
+        assert path in r.stages, "パスは一切改変されずに保持される"
+        assert r.conflict_paths == {path}
+
+    def test_info_message_with_multiple_paths(self):
+        """rename/rename のように 1 レコードが複数パスを持つ場合。"""
+        data = (
+            b"t" * 40
+            + b"\0\0"
+            + b"3\0a.py\0b.py\0c.py\0CONFLICT (rename/rename)\0msg\n\0"
+        )
+        r = parse(data, clean=False)
+        assert r.messages == (
+            InfoMessage(paths=("a.py", "b.py", "c.py"), type="CONFLICT (rename/rename)", message="msg"),
+        )
+        assert r.conflict_paths == {"a.py", "b.py", "c.py"}
+        assert r.is_structural()

@@ -1,0 +1,143 @@
+name: 解析
+
+# 解析対象はワークフローに埋め込まない。
+#
+#   Run workflow でリポジトリを指定 -> 解析して結果を蓄積（キャッシュ）
+#   定期実行                        -> すでに蓄積されている全件を再解析
+#
+# 一度解析したリポジトリは docs/data/index.json に残り、以後は自動で
+# 更新されていく。
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 解析するリポジトリ（owner/name）
+        required: true
+      lines:
+        description: 統合ブランチ（カンマ区切り）。分岐した統合先が複数あれば全て挙げる
+        required: true
+        default: main
+      include_forks:
+        description: フォーク側の PR も含める
+        type: boolean
+        default: true
+      publish:
+        description: 結果を公開データに追加する（外すと artifact のみ）
+        type: boolean
+        default: true
+  schedule:
+    # 6時間ごとに、蓄積済みの全リポジトリを更新する。
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: analyze
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: git のバージョンを確認
+        # merge-tree --write-tree -z が要る。古い git だと衝突を
+        # 正しく検出できないため、ここで落とす。
+        run: |
+          git --version
+          python3 - <<'PY'
+          import re, subprocess, sys
+          out = subprocess.run(["git","--version"],capture_output=True,text=True).stdout
+          v = tuple(int(x) for x in re.search(r"(\d+)\.(\d+)", out).groups())
+          if v < (2, 40):
+              sys.exit(f"git >= 2.40 が必要です (検出: {v})")
+          print(f"OK: git {v}")
+          PY
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 解析を実行
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "${{ inputs.repo }}" ]; then
+            # 定期実行: 蓄積済みの全件を更新
+            python -m analyzer.analyze --refresh --outdir docs/data
+            echo "publish=true" >> "$GITHUB_ENV"
+          elif [ "${{ inputs.publish }}" = "false" ]; then
+            # 公開せず結果だけ見たい場合
+            python -m analyzer.analyze \
+              --repo "${{ inputs.repo }}" --lines "${{ inputs.lines }}" \
+              ${{ inputs.include_forks == false && '--no-forks' || '' }} \
+              --out adhoc-analysis.json
+            echo "publish=false" >> "$GITHUB_ENV"
+          else
+            # 指定リポジトリを解析してキャッシュに追加
+            python -m analyzer.analyze \
+              --repo "${{ inputs.repo }}" --lines "${{ inputs.lines }}" \
+              ${{ inputs.include_forks == false && '--no-forks' || '' }} \
+              --outdir docs/data
+            echo "publish=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: サマリを出力
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          adhoc = pathlib.Path("adhoc-analysis.json")
+          if adhoc.exists():
+              docs = {"(未公開)": json.loads(adhoc.read_text())}
+          else:
+              idx = pathlib.Path("docs/data/index.json")
+              if not idx.exists():
+                  print("解析結果がありません"); raise SystemExit
+              index = json.loads(idx.read_text())
+              docs = {
+                  e["repo"]: json.loads((idx.parent / e["file"]).read_text())
+                  for e in index["analyses"]
+              }
+          print("## 解析結果\n")
+          print("| リポジトリ | PR | 衝突ペア | 要rebase |")
+          print("|---|---:|---:|---:|")
+          for repo, d in docs.items():
+              s = d["stats"]
+              print(f"| {repo} | {s['prs_total']} | {s['conflict_pairs']} | {s['base_conflicts']} |")
+          print("\n### 行動が必要なこと\n")
+          for repo, d in docs.items():
+              for a in d.get("actions", []):
+                  print(f"- **{repo}** — {a['message']}")
+          PY
+
+      - name: 成果物をアップロード
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysis
+          path: |
+            docs/data/*.json
+            adhoc-analysis.json
+          if-no-files-found: ignore
+
+      - name: 結果をコミット
+        if: env.publish == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/data/*.json
+          if git diff --staged --quiet; then
+            echo "変更なし"
+            exit 0
+          fi
+          git commit -m "chore: 解析結果を更新 ($(date -u +%Y-%m-%dT%H:%MZ))"
+          # checkout 後に他のコミットが載っている可能性があるので、
+          # push の直前に取り込む。これが無いと non-fast-forward で落ちる。
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && git push && exit 0
+            echo "push に失敗。再試行 $i"
+            sleep 5
+          done
+          exit 1
