@@ -162,7 +162,13 @@ function prBadges(pr) {
   if (pr.is_draft) out.push(el("span", { class: "badge draft" }, "Draft"));
   if (pr.base_conflict) out.push(el("span", { class: "badge rebase" }, "⚠ 要rebase"));
   if (pr.kind === "external_pr") out.push(el("span", { class: "badge fork" }, "外部fork"));
-  if (pr.duplicate_of) out.push(el("span", { class: "badge warn" }, "⧉ 重複"));
+  if (pr.duplicate_of) {
+    out.push(el("span", {
+      class: "badge",
+      title: `${pr.duplicate_of.join(", ")} と同じ head コミット。`
+        + "マージ先が違えば、レビュー用と着地用を分けている場合がある",
+    }, "⧉ 同一コミット"));
+  }
   if (pr.blocks && pr.blocks.length) {
     out.push(el("span", { class: "badge blocks", title: pr.blocks.join(", ") }, `${pr.blocks.length}件をブロック`));
   }
@@ -1149,12 +1155,14 @@ function viewStacks() {
     const body = el("div", { class: "panel-body" });
     for (const w of [...dup, ...orphan]) {
       body.append(el("div", { class: "pr" },
-        el("span", { class: "badge warn" }, w.kind === "duplicate_pr_head" ? "⧉ 重複" : "親PR不在"),
+        el("span", { class: "badge warn" },
+          w.kind === "duplicate_pr_head" ? "⧉ 同一コミット" : "親PR不在"),
         el("span", { class: "pr-title" }, w.detail),
         el("span", { class: "mono small" }, w.subjects.map(shortId).join(" "))));
     }
     root.append(el("div", { class: "panel" },
-      el("h3", {}, "片付け候補", el("span", { class: "muted" }, "— 順序問題ではなく掃除タスク")), body));
+      el("h3", {}, "確認したいもの",
+        el("span", { class: "muted" }, "— 順序の問題ではなく、構成の確認")), body));
   }
   return root;
 }
@@ -1716,7 +1724,11 @@ function prDetail(id) {
     put("これを待つPR", el("span", {}, ...pr.blocks.map((b, i) => el("span", {}, i ? " " : "", prOpenButton(b)))));
   }
   if (pr.duplicate_of) {
-    put("重複", el("span", {}, ...pr.duplicate_of.map((d) => prOpenButton(d)), " と同一コミット"));
+    put("同一コミット", el("span", {},
+      ...pr.duplicate_of.map((d) => prOpenButton(d)),
+      el("div", { class: "small muted" },
+        "head が同じ PR。マージ先が違う場合は、レビュー用と着地用を"
+        + "分けていることがあるので、重複とは限らない")));
   }
   out.push(el("section", {}, el("h4", {}, "この PR について"), kv));
 

@@ -240,3 +240,31 @@ class TestForkLineAliases:
         g = dag.build(prs, self.aliased_lines())
         assert g.line_of(f"{FK}#8") == "main"
         assert g.resolutions[f"{FK}#8"].ancestors == (f"{FK}#7",)
+
+
+class TestDuplicateHeadWording:
+    """head が同じでも、マージ先が違えば重複とは限らない。
+
+    同じ内容を「レビュー用にフォーク内へ」「着地用に上流へ」と二重に
+    出すのは正当なやり方で、掃除の対象ではない。
+    """
+
+    def test_same_base_is_a_cleanup_candidate(self):
+        prs = [
+            pr(UP, 1, FK, "feat/x", UP, "main"),
+            pr(UP, 2, FK, "feat/x", UP, "main"),
+        ]
+        g = dag.build(prs, LINES)
+        w = next(x for x in g.warnings if x.kind == "duplicate_pr_head")
+        assert w.severity == "warn"
+        assert "掃除の候補" in w.detail
+
+    def test_different_base_is_not_asserted_to_be_duplicate(self):
+        prs = [
+            pr(UP, 1, FK, "feat/x", UP, "main"),
+            pr(FK, 2, FK, "feat/x", FK, "feat/parent"),
+        ]
+        g = dag.build(prs, LINES)
+        w = next(x for x in g.warnings if x.kind == "duplicate_pr_head")
+        assert w.severity == "info"
+        assert "重複とは限らない" in w.detail

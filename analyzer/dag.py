@@ -124,18 +124,32 @@ def build(
         graph.head_index.setdefault(graph.head_node(pr_id), []).append(pr_id)
 
     for node, owners in sorted(graph.head_index.items()):
-        if len(owners) > 1:
-            graph.warnings.append(
-                GraphWarning(
-                    kind="duplicate_pr_head",
-                    severity="warn",
-                    subjects=tuple(sorted(owners)),
-                    detail=(
-                        f"同一の head ノード {node} を {len(owners)} 件の PR が共有している。"
-                        "どちらかをクローズする掃除タスクの候補。"
-                    ),
-                )
+        if len(owners) <= 1:
+            continue
+        # head が同じでも、マージ先が違えば意味が違う。
+        # 同じ内容を「レビュー用にフォーク内へ」「着地用に上流へ」と
+        # 二重に出すのは正当なやり方なので、掃除だと決めつけない。
+        bases = {graph.base_node(o) for o in owners}
+        if len(bases) == 1:
+            detail = (
+                f"同一の head ノード {node} を {len(owners)} 件の PR が共有し、"
+                "マージ先も同じ。どちらか一方で足りるため、掃除の候補。"
             )
+        else:
+            detail = (
+                f"同一の head ノード {node} を {len(owners)} 件の PR が共有しているが、"
+                "マージ先が異なる（" + " / ".join(sorted(bases)) + "）。"
+                "同じ内容をレビュー用と着地用に分けて出している場合があるので、"
+                "重複とは限らない。実際にマージされるのはどれかを確認すること。"
+            )
+        graph.warnings.append(
+            GraphWarning(
+                kind="duplicate_pr_head",
+                severity="warn" if len(bases) == 1 else "info",
+                subjects=tuple(sorted(owners)),
+                detail=detail,
+            )
+        )
 
     for pr_id in sorted(graph.prs):
         graph.resolutions[pr_id] = _resolve(graph, pr_id, integration_lines, infer_line)
