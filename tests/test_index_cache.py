@@ -333,3 +333,29 @@ class TestStackOrderInvariant:
 
         out = enforce_predecessors(["a", "b"], {"a": {"b"}, "b": {"a"}})
         assert sorted(out) == ["a", "b"]
+
+
+class TestLineReplacementNotice:
+    """統合ラインの指定を置き換えるときは、必ず気づけるようにする。
+
+    別の実行が違う lines で走ると、蓄積されている指定は黙って上書き
+    される。実際にこれで設定が失われた。
+    """
+
+    def test_replacement_is_reported(self, tmp_path, stub_run, capsys):
+        analyze.analyze_and_cache(
+            [{"repo": "o/r", "lines": ["release"]}], tmp_path, verbose=True
+        )
+        analyze.analyze_and_cache(
+            [{"repo": "o/r", "lines": ["main"]}], tmp_path, verbose=True
+        )
+        err = capsys.readouterr().err
+        assert "置き換えます" in err
+        assert "release" in err and "main" in err
+
+    def test_same_lines_is_quiet(self, tmp_path, stub_run, capsys):
+        for _ in range(2):
+            analyze.analyze_and_cache(
+                [{"repo": "o/r", "lines": ["main"]}], tmp_path, verbose=True
+            )
+        assert "置き換えます" not in capsys.readouterr().err

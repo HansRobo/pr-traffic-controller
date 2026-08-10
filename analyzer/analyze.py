@@ -358,6 +358,16 @@ def analyze_and_cache(
         lines = t.get("lines") or ["main"]
         if verbose:
             print(f"\n===== {repo} =====", file=sys.stderr)
+        # 既存の設定と違う統合ラインで実行すると、蓄積されている設定は
+        # 置き換わる。黙って変わると、誰かの指定が別の実行で失われるので
+        # 必ずログに残す。
+        prev = by_repo.get(repo)
+        if prev and (prev.get("lines") or []) != list(lines):
+            print(
+                f"  注意: 統合ラインの指定を {prev.get('lines')} から {list(lines)} へ"
+                f"置き換えます。以前の指定は失われます。",
+                file=sys.stderr,
+            )
         try:
             data = run(
                 repo,
