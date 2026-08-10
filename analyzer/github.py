@@ -38,7 +38,7 @@ query($owner:String!, $name:String!, $endCursor:String) {
         reviewDecision
         baseRefName baseRepository { nameWithOwner }
         headRefName headRefOid headRepository { nameWithOwner }
-        reviews(last: 5, states: [CHANGES_REQUESTED, COMMENTED]) {
+        reviews(last: 20) {
           nodes { author { login } state body url }
         }
         reviewThreads(first: 20) {
@@ -150,7 +150,10 @@ def fetch_pull_requests(repo: str) -> list[PullRequest]:
                 base_repo=base_repo,
                 base_branch=n["baseRefName"],
                 is_draft=n["isDraft"],
-                review_decision=n.get("reviewDecision") or "NONE",
+                review_decision=_effective_review_decision(
+                    n.get("reviewDecision"),
+                    ((n.get("reviews") or {}).get("nodes") or []),
+                ),
                 github_mergeable=n.get("mergeable") or "UNKNOWN",
                 additions=n.get("additions") or 0,
                 deletions=n.get("deletions") or 0,
@@ -166,6 +169,41 @@ def fetch_pull_requests(repo: str) -> list[PullRequest]:
 #: コメント本文はそのまま持つと肥大するので切り詰める。
 _BODY_LIMIT = 600
 
+#: 承認状態を左右しないレビュー種別。
+#: COMMENTED は「見たがどちらでもない」で、以前の承認を取り消さない。
+_NEUTRAL_REVIEWS = ("COMMENTED", "PENDING", "DISMISSED")
+
+
+def _effective_review_decision(declared: str | None, reviews: list[dict]) -> str:
+    """レビュー状態を決める。
+
+    GitHub の `reviewDecision` は **レビュー必須の設定があるリポジトリでしか
+    算出されない**。フォークのように設定の無いリポジトリでは、承認が
+    あっても null が返る。そのままだと承認済みの PR を「レビュー待ち」と
+    誤って表示し、マージ順の推奨まで狂う。
+
+    算出されていればそれを信じ、無ければ実際のレビューから決める。
+    判定は GitHub の見え方に合わせ、**投稿者ごとの最新のレビュー**を採る
+    （COMMENTED は状態を変えない）。
+    """
+    if declared:
+        return declared
+
+    latest: dict[str, str] = {}
+    for r in reviews:  # last: N は古い順に並ぶので、後勝ちでよい
+        state = r.get("state") or ""
+        if state in _NEUTRAL_REVIEWS:
+            continue
+        author = (r.get("author") or {}).get("login") or "?"
+        latest[author] = state
+
+    states = set(latest.values())
+    if "CHANGES_REQUESTED" in states:
+        return "CHANGES_REQUESTED"
+    if "APPROVED" in states:
+        return "APPROVED"
+    return "NONE"
+
 
 def _review_notes(node: dict) -> tuple[ReviewNote, ...]:
     """レビューの指摘を「まだ直す必要があるもの」に絞って取り出す。
@@ -175,6 +213,8 @@ def _review_notes(node: dict) -> tuple[ReviewNote, ...]:
     out: list[ReviewNote] = []
 
     for r in ((node.get("reviews") or {}).get("nodes") or []):
+        if (r.get("state") or "") not in ("CHANGES_REQUESTED", "COMMENTED"):
+            continue
         body = (r.get("body") or "").strip()
         if not body:
             continue
