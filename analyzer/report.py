@@ -243,6 +243,7 @@ def build(
                 for c in plan.clusters
             ],
             "independent": plan.independent,
+            "undetermined": plan.undetermined,
             "order_sensitivity": plan.order_sensitivity,
             "presets": plan.presets,
             "metrics": {

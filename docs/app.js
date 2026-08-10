@@ -324,6 +324,10 @@ function viewBoard() {
   const clusterOf = new Map();
   for (const c of o.clusters) for (const m of c.members) clusterOf.set(m, c.id);
   const independent = new Set(o.independent);
+  // 要rebase の PR は着地tree を作れず、干渉を計算できていない。
+  // 「独立」と同じ扱いにすると、判定できていないものを
+  // 「誰とも干渉しない」と誤って伝えることになる。
+  const undetermined = new Set(o.undetermined || []);
 
   const steps = preset.simulation
     ? preset.simulation.steps
@@ -338,7 +342,11 @@ function viewBoard() {
     el("div", {}, el("strong", {}, cleanCount), "そのままマージできる"),
     el("div", {}, el("strong", {}, conflictCount), "解決が必要"),
     el("div", {}, el("strong", {}, rebaseCount), "先にrebaseが必要"),
-    el("div", {}, el("strong", {}, independent.size), "順不同でよい"),
+    el("div", {}, el("strong", {}, independent.size), "独立にマージ可能"),
+    undetermined.size
+      ? el("div", { title: "ベースと衝突していて着地させられないため、他PRとの干渉を判定できていない" },
+          el("strong", {}, undetermined.size), "干渉は判定不能")
+      : null,
   ));
 
   const nextUp = preset.order.find((id) => (stepByPr.get(id) || {}).result === "clean");
@@ -375,8 +383,13 @@ function viewBoard() {
               "先に必要: ", ...deps.map((a, i) => el("span", {}, i ? " → " : "", prOpenButton(a))))
           : null),
       el("span", { class: "seq-tag" },
-        independent.has(id)
-          ? el("span", { class: "badge", title: "他のどのPRとも干渉しないので、いつマージしてもよい" }, "順不同")
+        undetermined.has(id)
+          ? el("span", {
+              class: "badge warn",
+              title: "ベースと衝突しているため干渉を判定できていない。rebase して初めて分かる",
+            }, "判定不能")
+          : independent.has(id)
+          ? el("span", { class: "badge", title: "他のどのPRとも干渉しないので、いつマージしてもよい" }, "独立")
           : cid
             ? el("button", {
                 class: "badge cluster-link",
@@ -515,8 +528,8 @@ function viewCluster() {
   ));
 
   root.append(el("p", { class: "hint" },
-    "このクラスタの中でだけ順序が問題になります。他のクラスタや独立PRとは"
-    + "互いに干渉しないので、どの順番でマージしても構いません。"
+    "このクラスタの中でだけ順序が問題になります。他のクラスタや"
+    + "独立にマージ可能な PR とは互いに干渉しないので、どの順番でマージしても構いません。"
   ));
   if (authors.length) {
     const who = el("div", { class: "filters" }, el("span", { class: "small muted" }, "関係者:"));

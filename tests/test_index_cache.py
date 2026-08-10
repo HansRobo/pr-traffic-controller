@@ -192,3 +192,43 @@ class TestForget:
         analyze.analyze_and_cache([{"repo": "owner/two", "lines": ["main"]}], tmp_path, verbose=False)
         analyze.forget("owner/one", tmp_path, verbose=False)
         assert [t["repo"] for t in analyze.targets_from_index(tmp_path)] == ["owner/two"]
+
+
+class TestUndetermined:
+    """ベース衝突の PR を「独立」と混ぜないこと。
+
+    着地tree が作れないと全ペアが degraded になり、衝突辺が 1 本も
+    立たない。素朴にクラスタ分解すると「誰とも干渉しない＝独立」に
+    見えてしまうが、実際は判定できていないだけ。
+    """
+
+    @staticmethod
+    def _plan(pairs=()):
+        from analyzer import dag, order
+        from analyzer.model import Candidate, PullRequest
+
+        def mk(n):
+            return PullRequest(
+                repo="o/r", number=n, title=f"#{n}", url="", author="a",
+                head_repo="o/r", head_branch=f"b{n}", head_oid=f"{n:040d}",
+                base_repo="o/r", base_branch="main",
+            )
+
+        graph = dag.build([mk(1), mk(2)], {dag.node_key("o/r", "main"): "main"})
+        cands = [
+            Candidate(id="o/r#1", head="a", line="main", landing_tree="t1"),
+            Candidate(id="o/r#2", head="b", line="main", landing_tree=None),
+        ]
+        return order.plan_line("main", cands, list(pairs), graph)
+
+    def test_base_conflict_pr_is_not_called_independent(self):
+        from analyzer.model import PairResult, Relation
+
+        plan = self._plan([PairResult(a="o/r#1", b="o/r#2", relation=Relation.DEGRADED)])
+        assert plan.independent == ["o/r#1"]
+        assert plan.undetermined == ["o/r#2"]
+
+    def test_every_pr_appears_exactly_once_in_the_order(self):
+        plan = self._plan()
+        for preset in plan.presets.values():
+            assert sorted(preset["order"]) == ["o/r#1", "o/r#2"]

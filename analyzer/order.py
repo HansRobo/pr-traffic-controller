@@ -121,6 +121,14 @@ class LinePlan:
     line: str
     clusters: list[Cluster] = field(default_factory=list)
     independent: list[str] = field(default_factory=list)
+    undetermined: list[str] = field(default_factory=list)
+    """干渉が判定できなかった PR（ベース衝突で着地tree を作れないもの）。
+
+    **「独立」と一緒にしてはいけない。** 着地tree が無いと全ペアが
+    degraded になり、衝突辺が 1 本も立たないので、素朴にクラスタ分解すると
+    「誰とも干渉しない＝独立」に見えてしまう。実際は干渉の有無が
+    分かっていないだけで、rebase して初めて判定できる。
+    """
     presets: dict[str, dict] = field(default_factory=dict)
     metrics: dict[str, Metrics] = field(default_factory=dict)
     order_sensitivity: dict = field(default_factory=dict)
@@ -486,10 +494,20 @@ def plan_line(
         )
 
     pair_map: dict[tuple[str, str], PairResult] = {p.key(): p for p in pairs}
-    clusters, independent = build_clusters(ids, pairs, graph)
+    clusters, unclustered = build_clusters(ids, pairs, graph)
     preds = _predecessors(ids, graph)
 
-    plan = LinePlan(line=line, clusters=clusters, independent=independent)
+    # クラスタに属さないものを「独立」と「判定不能」に分ける。
+    # ベース衝突の PR は着地tree が無く、干渉を計算できていない。
+    undetermined = [i for i in unclustered if by_id[i].has_base_conflict]
+    independent = [i for i in unclustered if not by_id[i].has_base_conflict]
+
+    plan = LinePlan(
+        line=line,
+        clusters=clusters,
+        independent=independent,
+        undetermined=undetermined,
+    )
 
     for name, w in PRESETS.items():
         seq: list[str] = []
@@ -500,8 +518,10 @@ def plan_line(
             cluster_orders[c.id] = o
             exact = exact and ok
             seq.extend(o)
-        # クラスタ間には衝突項が無いので、待たせるコストだけで並べる
+        # クラスタ間には衝突項が無いので、待たせるコストだけで並べる。
+        # 判定不能なものは後ろに置く（rebase しないとそもそも流せない）。
         seq.extend(sorted(independent, key=lambda m: -urgency(ctx[m], w)))
+        seq.extend(sorted(undetermined, key=lambda m: -urgency(ctx[m], w)))
         plan.presets[name] = {
             "order": seq,
             "optimal": exact,
