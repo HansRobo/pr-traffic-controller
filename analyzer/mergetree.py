@@ -159,6 +159,68 @@ def parse(data: bytes, *, clean: bool) -> MergeTreeResult:
     )
 
 
+#: 1 ファイルあたりに保持する衝突箇所の上限。
+MAX_HUNKS_PER_FILE = 3
+#: 片側あたりに保持する行数の上限。
+MAX_LINES_PER_SIDE = 20
+
+
+@dataclass(frozen=True)
+class ConflictHunk:
+    """衝突した 1 箇所の、両側の中身。
+
+    `merge-tree --write-tree` が書き出す tree では、衝突したファイルに
+    通常のマージと同じ衝突マーカーが入る。そこから両側を取り出せば、
+    「具体的に何と何がぶつかっているか」をそのまま見せられる。
+    """
+
+    start_line: int
+    ours: tuple[str, ...]
+    theirs: tuple[str, ...]
+    ours_truncated: bool = False
+    theirs_truncated: bool = False
+
+
+def parse_conflict_hunks(text: str) -> tuple[ConflictHunk, ...]:
+    """衝突マーカーを含む本文から、両側の中身を取り出す。
+
+    既定の 2 way スタイル（`<<<<<<<` / `=======` / `>>>>>>>`）を読む。
+    diff3 スタイルの `|||||||` 節が来た場合は共通の祖先なので読み飛ばす。
+    """
+    hunks: list[ConflictHunk] = []
+    ours: list[str] = []
+    theirs: list[str] = []
+    state = None  # None | "ours" | "base" | "theirs"
+    start = 0
+
+    for i, line in enumerate(text.split("\n"), start=1):
+        if line.startswith("<<<<<<<"):
+            state, ours, theirs, start = "ours", [], [], i
+        elif state and line.startswith("|||||||"):
+            state = "base"
+        elif state and line.startswith("======="):
+            state = "theirs"
+        elif state and line.startswith(">>>>>>>"):
+            hunks.append(
+                ConflictHunk(
+                    start_line=start,
+                    ours=tuple(ours[:MAX_LINES_PER_SIDE]),
+                    theirs=tuple(theirs[:MAX_LINES_PER_SIDE]),
+                    ours_truncated=len(ours) > MAX_LINES_PER_SIDE,
+                    theirs_truncated=len(theirs) > MAX_LINES_PER_SIDE,
+                )
+            )
+            state = None
+            if len(hunks) >= MAX_HUNKS_PER_FILE:
+                break
+        elif state == "ours":
+            ours.append(line)
+        elif state == "theirs":
+            theirs.append(line)
+
+    return tuple(hunks)
+
+
 def _decode(raw: bytes) -> str:
     """パスをデコードする。
 

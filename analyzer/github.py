@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from .model import PullRequest
+from .model import PullRequest, ReviewNote
 
 _PR_QUERY = """
 query($owner:String!, $name:String!, $endCursor:String) {
@@ -28,6 +28,15 @@ query($owner:String!, $name:String!, $endCursor:String) {
         reviewDecision
         baseRefName baseRepository { nameWithOwner }
         headRefName headRefOid headRepository { nameWithOwner }
+        reviews(last: 5, states: [CHANGES_REQUESTED, COMMENTED]) {
+          nodes { author { login } state body url }
+        }
+        reviewThreads(first: 20) {
+          nodes {
+            isResolved isOutdated path line
+            comments(first: 1) { nodes { author { login } body url } }
+          }
+        }
       }
     }
   }
@@ -95,6 +104,7 @@ def fetch_pull_requests(repo: str) -> list[PullRequest]:
 
     prs: list[PullRequest] = []
     for n in nodes:
+        notes = _review_notes(n)
         head_repo = (n.get("headRepository") or {}).get("nameWithOwner")
         base_repo = (n.get("baseRepository") or {}).get("nameWithOwner") or repo
         if not head_repo:
@@ -121,9 +131,58 @@ def fetch_pull_requests(repo: str) -> list[PullRequest]:
                 changed_files_count=n.get("changedFiles") or 0,
                 created_at=n.get("createdAt") or "",
                 updated_at=n.get("updatedAt") or "",
+                review_notes=notes,
             )
         )
     return prs
+
+
+#: コメント本文はそのまま持つと肥大するので切り詰める。
+_BODY_LIMIT = 600
+
+
+def _review_notes(node: dict) -> tuple[ReviewNote, ...]:
+    """レビューの指摘を「まだ直す必要があるもの」に絞って取り出す。
+
+    解決済みスレッドは除く。本文が空のレビュー（承認だけ、など）も除く。
+    """
+    out: list[ReviewNote] = []
+
+    for r in ((node.get("reviews") or {}).get("nodes") or []):
+        body = (r.get("body") or "").strip()
+        if not body:
+            continue
+        out.append(
+            ReviewNote(
+                author=(r.get("author") or {}).get("login", "(unknown)"),
+                state=r.get("state") or "COMMENTED",
+                body=body[:_BODY_LIMIT],
+                url=r.get("url") or "",
+            )
+        )
+
+    for th in ((node.get("reviewThreads") or {}).get("nodes") or []):
+        if th.get("isResolved"):
+            continue
+        comments = (th.get("comments") or {}).get("nodes") or []
+        if not comments:
+            continue
+        c = comments[0]
+        body = (c.get("body") or "").strip()
+        if not body:
+            continue
+        out.append(
+            ReviewNote(
+                author=(c.get("author") or {}).get("login", "(unknown)"),
+                state="INLINE",
+                body=body[:_BODY_LIMIT],
+                path=th.get("path") or "",
+                line=th.get("line"),
+                url=c.get("url") or "",
+                outdated=bool(th.get("isOutdated")),
+            )
+        )
+    return tuple(out)
 
 
 def collect(target_repo: str, *, include_forks: bool = True) -> tuple[list[PullRequest], list[str]]:

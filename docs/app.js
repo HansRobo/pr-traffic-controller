@@ -318,66 +318,130 @@ function viewBoard() {
               + "（件数を優先するなら「マージ数を最大に」）。"
             : "")));
 
-  // 独立にマージ可能なもの / クラスタ
-  const cols = el("div", { class: "grid cols-2" });
+  // --- マージ手順 ------------------------------------------------
+  // 「結局どの順でマージすればいいのか」に一列で答える。独立PRとクラスタを
+  // 別々の箱に分けていたときは、全体の順番が読み取れなかった。
+  const clusterOf = new Map();
+  for (const c of o.clusters) for (const m of c.members) clusterOf.set(m, c.id);
+  const independent = new Set(o.independent);
 
-  const indep = o.independent.filter((id) => !state.hideDraft || !PR.get(id)?.is_draft);
-  const indepPanel = el("panel", {});
-  cols.append(
-    el("div", { class: "panel" },
-      el("h3", {}, "独立にマージ可能 ", el("strong", {}, String(indep.length)), " 件",
-        el("span", { class: "muted" }, "— 互いに干渉しないので、どの順番でもよい")),
-      el("div", { class: "panel-body" },
-        indep.length
-          ? indep.map((id) => prCard(id))
-          : el("div", { class: "empty" }, "なし")),
-    ),
-  );
+  const steps = preset.simulation
+    ? preset.simulation.steps
+    : preset.order.map((pr, i) => ({ index: i + 1, pr }));
+  const stepByPr = new Map(steps.map((s) => [s.pr, s]));
 
-  const clusterWrap = el("div", { class: "panel" },
-    el("h3", {}, "順序を議論すべき ", el("strong", {}, String(o.clusters.length)), " クラスタ",
-      el("span", { class: "muted" }, "— この中だけ順序が意味を持つ")),
-  );
-  const cbody = el("div", { class: "panel-body" });
-  if (!o.clusters.length) cbody.append(el("div", { class: "empty" }, "衝突クラスタなし"));
+  const cleanCount = steps.filter((s) => s.result === "clean").length;
+  const rebaseCount = steps.filter((s) => s.result === "skipped").length;
+  const conflictCount = steps.filter((s) => s.result === "conflict").length;
+  root.append(el("div", { class: "stat-row" },
+    el("div", {}, el("strong", {}, preset.order.length), "対象PR"),
+    el("div", {}, el("strong", {}, cleanCount), "そのままマージできる"),
+    el("div", {}, el("strong", {}, conflictCount), "解決が必要"),
+    el("div", {}, el("strong", {}, rebaseCount), "先にrebaseが必要"),
+    el("div", {}, el("strong", {}, independent.size), "順不同でよい"),
+  ));
 
-  const stepByPr = new Map();
-  if (preset.simulation) for (const s of preset.simulation.steps) stepByPr.set(s.pr, s);
+  const nextUp = preset.order.find((id) => (stepByPr.get(id) || {}).result === "clean");
+  const visible = preset.order.filter((id) => !state.hideDraft || !PR.get(id)?.is_draft);
 
-  // クラスタ内の並びは、プリセットの全体順序から絞り込んで導く。
-  // preset.cluster_orders に頼ると、それを持たないプリセット
-  // （max-landing は実マージで順序を作るため持たない）で並びが崩れる。
-  const globalRank = new Map(preset.order.map((id, i) => [id, i]));
-  for (const c of o.clusters) {
-    const order = [...c.members].sort(
-      (a, b) => (globalRank.get(a) ?? 1e9) - (globalRank.get(b) ?? 1e9),
-    );
-    const list = el("div", {});
-    order.forEach((id, i) => {
-      const s = stepByPr.get(id);
-      let note = null;
-      if (s && s.result === "conflict") {
-        const files = (s.conflict_files || []).map((f) => f.path.split("/").pop());
-        note = `逐次マージで衝突: ${files.slice(0, 3).join(", ")}`;
-      } else if (s && s.result === "skipped") {
-        note = "先に rebase が必要";
+  const seqBody = el("div", { class: "seq" });
+  visible.forEach((id) => {
+    const s = stepByPr.get(id) || {};
+    const pr = PR.get(id);
+    const cid = clusterOf.get(id);
+    const pos = preset.order.indexOf(id) + 1;
+
+    let mark, cls, note;
+    if (s.result === "skipped") {
+      mark = "⏸"; cls = "rebase";
+      note = "ベースと衝突しているので、まず rebase する";
+    } else if (s.result === "conflict") {
+      mark = "⚠"; cls = "conflict";
+      const files = (s.conflict_files || []).map((f) => f.path.split("/").pop());
+      note = `この時点で衝突する: ${files.slice(0, 3).join(", ")}${files.length > 3 ? " ほか" : ""}`;
+    } else {
+      mark = "✓"; cls = "clean";
+      note = "そのままマージできる";
+    }
+
+    const deps = (pr && pr.stack ? pr.stack.ancestors : []).filter((a) => PR.has(a));
+    seqBody.append(el("div", { class: "seq-row " + cls },
+      el("span", { class: "seq-no" }, pos),
+      el("span", { class: "seq-mark", title: note }, mark),
+      el("div", { class: "seq-main" },
+        prCard(id, { note }),
+        deps.length
+          ? el("div", { class: "small muted seq-dep" },
+              "先に必要: ", ...deps.map((a, i) => el("span", {}, i ? " → " : "", prOpenButton(a))))
+          : null),
+      el("span", { class: "seq-tag" },
+        independent.has(id)
+          ? el("span", { class: "badge", title: "他のどのPRとも干渉しないので、いつマージしてもよい" }, "順不同")
+          : cid
+            ? el("button", {
+                class: "badge cluster-link",
+                title: "このクラスタの詳細を見る",
+                onclick: (e) => { e.stopPropagation(); state.view = "cluster"; state.cluster = cid; render(); },
+              }, cid)
+            : null),
+    ));
+  });
+
+  const copyBtn = el("button", {
+    onclick: async (e) => {
+      const lines = preset.order.map((id, i) => {
+        const s = stepByPr.get(id) || {};
+        const pr = PR.get(id);
+        const st = s.result === "skipped" ? "要rebase"
+          : s.result === "conflict" ? "要衝突解決" : "そのまま可";
+        return `${i + 1}. [ ] ${pr ? pr.url : id} — ${pr ? pr.title : ""}（${st}）`;
+      });
+      const text = `マージ順（${state.line} / ${PRESET_LABEL[state.preset] || state.preset}）\n\n`
+        + lines.join("\n");
+      const btn = e.currentTarget;
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.textContent = "コピーしました";
+      } catch {
+        btn.textContent = "コピーできませんでした";
       }
-      list.append(prCard(id, { step: i + 1, note }));
-    });
-    cbody.append(
-      el("details", { open: true },
-        el("summary", {},
-          `${c.id}: ${c.members.length}件 / 内部衝突 ${c.internal_pairs}ペア　`,
-          el("span", {
-            class: "cluster-link",
-            onclick: (e) => { e.preventDefault(); e.stopPropagation(); state.view = "cluster"; state.cluster = c.id; render(); },
-          }, "詳細を見る →")),
-        list),
-    );
+      setTimeout(() => { btn.textContent = "手順をコピー"; }, 2000);
+    },
+  }, "手順をコピー");
+
+  root.append(el("div", { class: "panel" },
+    el("h3", {},
+      "マージ手順",
+      el("span", { class: "muted" }, `— ${PRESET_LABEL[state.preset] || state.preset}。上から順に`),
+      el("span", { class: "head-spacer" }),
+      copyBtn),
+    el("div", { class: "panel-body" },
+      nextUp
+        ? el("p", { class: "next-up" },
+            "次にマージするのは ", prOpenButton(nextUp),
+            el("span", { class: "muted" }, `　${PR.get(nextUp) ? PR.get(nextUp).title : ""}`))
+        : el("p", { class: "hint" }, "そのままマージできる PR がありません。まず rebase が必要です。"),
+      seqBody)));
+
+  // 順序が問題になる範囲への入口
+  if (o.clusters.length) {
+    const cl = el("div", { class: "cluster-cards" });
+    for (const c of o.clusters) {
+      const authors = authorsOf(c.members);
+      cl.append(el("button", {
+        class: "cluster-card",
+        onclick: () => { state.view = "cluster"; state.cluster = c.id; render(); },
+      },
+        el("strong", {}, c.id),
+        el("span", { class: "small muted" }, `${c.members.length}件 / 内部衝突 ${c.internal_pairs}ペア`),
+        el("span", { class: "file-authors" },
+          ...authors.slice(0, 5).map(([a, av]) => authorChip(a, av, { compact: true })))));
+    }
+    root.append(el("div", { class: "panel" },
+      el("h3", {}, "順序を議論すべき ", el("strong", {}, String(o.clusters.length)), " クラスタ",
+        el("span", { class: "muted" }, "— この中だけ順序が意味を持つ")),
+      el("div", { class: "panel-body" }, cl)));
   }
-  clusterWrap.append(cbody);
-  cols.append(clusterWrap);
-  root.append(cols);
 
   // 逐次シミュレーションの証拠
   if (preset.simulation) {
@@ -496,7 +560,13 @@ function viewCluster() {
         el("td", {}, prOpenButton(x.a)),
         el("td", {}, prOpenButton(x.b)),
         el("td", { class: "small" },
-          (x.conflict_files || []).map((f) => el("div", {}, el("code", {}, f.path))),
+          (x.conflict_files || []).map((f) =>
+            el("div", {}, fileLink(f.path),
+              f.hunks && f.hunks.length
+                ? el("details", { class: "hunk-details" },
+                    el("summary", { class: "small" }, `衝突箇所を見る（${f.hunks.length}）`),
+                    conflictHunks(f, x.a, x.b))
+                : null)),
           !x.conflict_files?.length && x.overlap_files
             ? el("div", { class: "muted" }, el("code", {}, x.overlap_files.slice(0, 2).join(", ")))
             : null),
@@ -542,7 +612,9 @@ function buildFileIndex() {
   for (const pair of iv.pairs) {
     if (pair.level === undefined) continue;
     for (const cf of pair.conflict_files || []) {
-      get(cf.path).conflicts.push({ a: pair.a, b: pair.b, level: pair.level, structural: cf.structural });
+      get(cf.path).conflicts.push({
+        a: pair.a, b: pair.b, level: pair.level, structural: cf.structural, file: cf,
+      });
     }
     for (const w of pair.warnings || []) {
       if (w.kind !== "same_function_region") continue;
@@ -681,10 +753,16 @@ function viewFiles() {
       if (rec.conflicts.length) {
         const cl = el("div", {});
         for (const c of rec.conflicts.sort((x, y) => y.level - x.level)) {
-          cl.append(el("div", { class: "fn-row" },
-            levelChip(c.level),
-            c.structural ? el("span", { class: "badge warn" }, "構造") : null,
-            el("span", { class: "fn-prs" }, prOpenButton(c.a), el("span", { class: "muted" }, "↔"), prOpenButton(c.b))));
+          cl.append(el("div", { class: "fn-row conflict-row" },
+            el("div", { class: "fn-prs" },
+              levelChip(c.level),
+              c.structural ? el("span", { class: "badge warn" }, "構造") : null,
+              prOpenButton(c.a), el("span", { class: "muted" }, "↔"), prOpenButton(c.b)),
+            c.file && c.file.hunks && c.file.hunks.length
+              ? el("details", { class: "hunk-details" },
+                  el("summary", { class: "small" }, `衝突箇所を見る（${c.file.hunks.length}）`),
+                  conflictHunks(c.file, c.a, c.b))
+              : null));
         }
         body.append(el("section", {}, el("h4", {}, "このファイルで起きている衝突"), cl));
       }
@@ -711,6 +789,8 @@ function viewFiles() {
 
 /** ファイルビューへ飛ぶリンク。 */
 function fileLink(path) {
+  // "path:line" の形でも渡されるので、遷移にはファイル部分だけを使う
+  const bare = path.replace(/:\d+$/, "");
   return el("button", {
     class: "pr-open",
     title: "このファイルを触っている PR を見る",
@@ -718,8 +798,8 @@ function fileLink(path) {
       e.stopPropagation();
       closePanel();
       state.view = "files";
-      state.file = path;
-      state.fileQuery = path;
+      state.file = bare;
+      state.fileQuery = bare;
       state.filesSharedOnly = false;
       render();
     },
@@ -769,7 +849,12 @@ function viewConflicts() {
     const files = p.conflict_files && p.conflict_files.length
       ? p.conflict_files.map((f) =>
           el("div", {}, fileLink(f.path),
-            f.structural ? el("span", { class: "badge warn", title: `ステージ ${f.stages.join(",")}` }, "構造") : null))
+            f.structural ? el("span", { class: "badge warn", title: `ステージ ${f.stages.join(",")}` }, "構造") : null,
+            f.hunks && f.hunks.length
+              ? el("details", { class: "hunk-details" },
+                  el("summary", { class: "small" }, `衝突箇所を見る（${f.hunks.length}）`),
+                  conflictHunks(f, p.a, p.b))
+              : null))
       : (p.overlap_files || []).slice(0, 4).map((f) => el("div", { class: "muted" }, fileLink(f)));
     const warns = (p.warnings || []).map((w) =>
       el("div", { class: "small" },
@@ -1199,6 +1284,32 @@ function pairsFor(id) {
     .sort((x, y) => y.level - x.level);
 }
 
+
+/** 衝突箇所の両側を並べて見せる。
+ *  `a` / `b` はペアの PR id（merge-tree の ours / theirs に対応）。 */
+function conflictHunks(file, aId, bId) {
+  if (!file.hunks || !file.hunks.length) return null;
+  const side = (id, lines, truncated) => {
+    const pr = PR.get(id);
+    return el("div", { class: "hunk-side" },
+      el("div", { class: "hunk-head" },
+        prOpenButton(id),
+        pr ? authorChip(pr.author, pr.author_avatar_url, { compact: true }) : null,
+        pr ? el("span", { class: "small muted" }, pr.title.slice(0, 34)) : null),
+      el("pre", { class: "hunk-code" },
+        (lines || []).join("\n") + (truncated ? "\n…（以降省略）" : "")));
+  };
+  const box = el("div", {});
+  for (const h of file.hunks) {
+    box.append(el("div", { class: "hunk" },
+      el("div", { class: "hunk-loc" }, el("code", {}, `${file.path}:${h.line}`)),
+      el("div", { class: "hunk-sides" },
+        side(aId, h.a, h.a_truncated),
+        side(bId, h.b, h.b_truncated))));
+  }
+  return box;
+}
+
 /** PR 詳細の中身。**サイドパネルと単一ページで共有する**（表示場所が
  *  変わっても同じ情報・同じ並びになるようにするため）。 */
 function prDetail(id) {
@@ -1219,6 +1330,37 @@ function prDetail(id) {
   stats.append(el("div", {}, el("strong", {}, `+${pr.additions}/-${pr.deletions}`), `${pr.changed_files_count} ファイル`));
   out.push(stats);
 
+  // レビューでの指摘。要修正の PR は「何を直すか」が最優先の情報。
+  const notes = pr.review_notes || [];
+  if (notes.length) {
+    const inline = notes.filter((n) => n.state === "INLINE");
+    const overall = notes.filter((n) => n.state !== "INLINE");
+    const box = el("div", {});
+    for (const n of [...overall, ...inline]) {
+      box.append(el("div", { class: "review-note" + (n.state === "CHANGES_REQUESTED" ? " changes" : "") },
+        el("div", { class: "review-head" },
+          authorChip(n.author, ""),
+          n.state === "CHANGES_REQUESTED"
+            ? el("span", { class: "badge warn" }, "要修正")
+            : n.state === "INLINE"
+              ? el("span", { class: "badge" }, "指摘")
+              : el("span", { class: "badge" }, "コメント"),
+          n.path ? fileLink(n.path + (n.line ? `:${n.line}` : "")) : null,
+          n.outdated ? el("span", { class: "badge", title: "コメント後にこの箇所が変更された" }, "行がずれている") : null,
+          n.url ? el("a", { class: "small", href: n.url, target: "_blank", rel: "noopener" }, "元コメント ↗") : null),
+        el("p", { class: "review-body" }, n.body)));
+    }
+    out.push(el("section", {},
+      el("h4", {}, pr.review_decision === "CHANGES_REQUESTED"
+        ? `修正が必要な箇所（${notes.length}件）` : `レビューでの指摘（${notes.length}件）`),
+      box));
+  } else if (pr.review_decision === "CHANGES_REQUESTED") {
+    out.push(el("section", {}, el("h4", {}, "修正が必要"),
+      el("p", { class: "hint" },
+        "修正要求が出ていますが、本文のあるコメントを取得できませんでした。"
+        + "GitHub 側で確認してください。")));
+  }
+
   // 干渉（干渉一覧ページと同じ形式）。この PR を見に来る一番の理由なので先頭に置く。
   if (related.length) {
     const tb = el("tbody");
@@ -1232,7 +1374,12 @@ function prDetail(id) {
         el("td", { class: "small" },
           (r.conflict_files || []).map((f) =>
             el("div", {}, fileLink(f.path),
-              f.structural ? el("span", { class: "badge warn" }, "構造") : null)),
+              f.structural ? el("span", { class: "badge warn" }, "構造") : null,
+              f.hunks && f.hunks.length
+                ? el("details", { class: "hunk-details" },
+                    el("summary", { class: "small" }, `衝突箇所を見る（${f.hunks.length}）`),
+                    conflictHunks(f, r.a, r.b))
+                : null)),
           !r.conflict_files?.length && r.overlap_files
             ? el("div", { class: "muted" }, el("code", {}, r.overlap_files.slice(0, 3).join(", ")))
             : null),

@@ -50,6 +50,26 @@ class WarningKind(str, Enum):
 
 
 @dataclass(frozen=True)
+class ReviewNote:
+    """レビューでの指摘。「どこをどう直すか」を PR 単位で持つ。
+
+    インラインコメントは `path` / `line` を持ち、PR 全体へのレビュー本文は
+    持たない。解決済みのスレッドは対象外（もう直す必要がない）。
+    """
+
+    author: str
+    state: str
+    """CHANGES_REQUESTED | COMMENTED | INLINE"""
+
+    body: str
+    path: str = ""
+    line: int | None = None
+    url: str = ""
+    outdated: bool = False
+    """コメント後にその箇所が変更され、行が追随できなくなったもの。"""
+
+
+@dataclass(frozen=True)
 class PullRequest:
     """GitHub から取得した PR のメタデータ。
 
@@ -76,6 +96,7 @@ class PullRequest:
     created_at: str = ""
     updated_at: str = ""
     author_avatar_url: str = ""
+    review_notes: tuple[ReviewNote, ...] = ()
 
     @property
     def id(self) -> str:
@@ -105,6 +126,8 @@ class ConflictFile:
     path: str
     stages: frozenset[int]
     types: tuple[str, ...] = ()
+    hunks: tuple = ()
+    """衝突箇所の両側の中身（mergetree.ConflictHunk）。"""
 
     @property
     def is_structural(self) -> bool:

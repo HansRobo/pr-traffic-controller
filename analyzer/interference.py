@@ -29,13 +29,15 @@ from .model import (
     PairResult,
     Relation,
 )
-from .mergetree import MergeTreeResult
+from .mergetree import MergeTreeResult, parse_conflict_hunks
 
 if TYPE_CHECKING:
     from .gitops import Repo
 
 
-def conflict_files_from(result: MergeTreeResult) -> tuple[ConflictFile, ...]:
+def conflict_files_from(
+    result: MergeTreeResult, repo: "Repo | None" = None
+) -> tuple[ConflictFile, ...]:
     """merge-tree の結果から衝突ファイル一覧を組み立てる。
 
     ステージ節と、型が CONFLICT で始まる情報レコードの **和集合** を取る。
@@ -49,11 +51,19 @@ def conflict_files_from(result: MergeTreeResult) -> tuple[ConflictFile, ...]:
 
     out: list[ConflictFile] = []
     for path in sorted(result.conflict_paths):
+        # merge-tree が書き出した tree では、衝突ファイルに通常のマージと
+        # 同じ衝突マーカーが入る。そこから両側の中身を取り出す。
+        hunks: tuple = ()
+        if repo is not None:
+            body = repo.show(result.tree_oid, path)
+            if body:
+                hunks = parse_conflict_hunks(body)
         out.append(
             ConflictFile(
                 path=path,
                 stages=result.stages.get(path, frozenset()),
                 types=tuple(sorted(types_by_path.get(path, ()))),
+                hunks=hunks,
             )
         )
     return tuple(out)
@@ -135,7 +145,7 @@ def analyze_pair(
         b=b.id,
         relation=Relation.COMPUTED,
         level=classify(result),
-        conflict_files=conflict_files_from(result),
+        conflict_files=conflict_files_from(result, repo),
         overlap_files=overlap,
         warnings=warnings,
     )
@@ -209,6 +219,6 @@ def build_candidate(
         line=line,
         landing_tree=None,
         changed_files=changed,
-        base_conflicts=conflict_files_from(result),
+        base_conflicts=conflict_files_from(result, repo),
         ancestors=ancestors,
     )

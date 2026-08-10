@@ -34,6 +34,17 @@ def _pair_dict(p: PairResult) -> dict:
                 "stages": sorted(c.stages),
                 "types": list(c.types),
                 "structural": c.is_structural,
+                # ours = ペアの a 側、theirs = b 側（pair_merge の引数順）
+                "hunks": [
+                    {
+                        "line": h.start_line,
+                        "a": list(h.ours),
+                        "b": list(h.theirs),
+                        **({"a_truncated": True} if h.ours_truncated else {}),
+                        **({"b_truncated": True} if h.theirs_truncated else {}),
+                    }
+                    for h in c.hunks
+                ],
             }
             for c in p.conflict_files
         ]
@@ -129,6 +140,18 @@ def build(
             "url": pr.url,
             "author": pr.author,
             "author_avatar_url": pr.author_avatar_url,
+            "review_notes": [
+                {
+                    "author": n.author,
+                    "state": n.state,
+                    "body": n.body,
+                    **({"path": n.path} if n.path else {}),
+                    **({"line": n.line} if n.line is not None else {}),
+                    **({"url": n.url} if n.url else {}),
+                    **({"outdated": True} if n.outdated else {}),
+                }
+                for n in pr.review_notes
+            ],
             "kind": "external_pr" if pr.repo != target else "pr",
             "is_cross_repository": pr.is_cross_repository,
             "head": {

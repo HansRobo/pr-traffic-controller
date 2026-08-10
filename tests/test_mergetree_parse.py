@@ -168,3 +168,42 @@ class TestParserRobustness:
         )
         assert r.conflict_paths == {"a.py", "b.py", "c.py"}
         assert r.is_structural()
+
+
+class TestConflictHunks:
+    """衝突マーカーから両側の中身を取り出す。"""
+
+    def test_two_way_markers(self):
+        from analyzer.mergetree import parse_conflict_hunks
+
+        text = "a\n<<<<<<< ours\nX1\nX2\n=======\nY1\n>>>>>>> theirs\nb\n"
+        (h,) = parse_conflict_hunks(text)
+        assert h.ours == ("X1", "X2")
+        assert h.theirs == ("Y1",)
+        assert h.start_line == 2
+
+    def test_diff3_base_section_is_skipped(self):
+        from analyzer.mergetree import parse_conflict_hunks
+
+        text = "<<<<<<< ours\nX\n||||||| base\nB\n=======\nY\n>>>>>>> theirs\n"
+        (h,) = parse_conflict_hunks(text)
+        assert h.ours == ("X",) and h.theirs == ("Y",)
+
+    def test_multiple_hunks_are_capped(self):
+        from analyzer.mergetree import MAX_HUNKS_PER_FILE, parse_conflict_hunks
+
+        one = "<<<<<<< o\nX\n=======\nY\n>>>>>>> t\n"
+        assert len(parse_conflict_hunks(one * 10)) == MAX_HUNKS_PER_FILE
+
+    def test_long_sides_are_truncated(self):
+        from analyzer.mergetree import MAX_LINES_PER_SIDE, parse_conflict_hunks
+
+        body = "\n".join(f"L{i}" for i in range(50))
+        (h,) = parse_conflict_hunks(f"<<<<<<< o\n{body}\n=======\nY\n>>>>>>> t\n")
+        assert len(h.ours) == MAX_LINES_PER_SIDE
+        assert h.ours_truncated and not h.theirs_truncated
+
+    def test_no_markers(self):
+        from analyzer.mergetree import parse_conflict_hunks
+
+        assert parse_conflict_hunks("plain text\nno markers\n") == ()

@@ -213,6 +213,13 @@ class Repo:
         names = out.stdout.split(b"\0")
         return frozenset(n.decode("utf-8", "surrogateescape") for n in names if n)
 
+    def show(self, tree: str, path: str) -> str | None:
+        """tree の中のファイル内容。存在しなければ None。"""
+        cp = self._run_raw("show", f"{tree}:{path}", text=False)
+        if cp.returncode != 0:
+            return None
+        return cp.stdout.decode("utf-8", "replace")
+
     def changed_hunks(self, base: str, target: str, path: str) -> list[Hunk]:
         """変更 hunk を、`base` 座標系の行範囲と**囲っている関数名**とともに返す。
 
