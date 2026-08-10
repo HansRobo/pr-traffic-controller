@@ -386,3 +386,27 @@ ul.tight li { margin: 2px 0; }
 }
 .pr-open { display: inline-flex; align-items: center; gap: 4px; }
 .side-panel header .author-chip { color: var(--ink); }
+
+/* --- ファイル・関数ビュー ------------------------------------------ */
+#file-list > details { border-bottom: 1px solid var(--border); }
+#file-list > details:last-child { border-bottom: none; }
+#file-list > details > summary {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 4px; font-size: 13px;
+}
+#file-list > details > summary code { overflow-wrap: break-word; }
+#file-list > details[open] > summary { background: var(--surface-2); }
+.file-authors { display: inline-flex; gap: 3px; align-items: center; margin-left: auto; }
+.file-body { padding: 6px 4px 16px 18px; border-left: 2px solid var(--border); margin-left: 6px; }
+.file-body section { margin-bottom: 16px; }
+.file-body section > h4 {
+  margin: 0 0 6px; font-size: 12px; letter-spacing: .04em;
+  color: var(--ink-2); font-weight: 700;
+}
+.fn-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 4px 0; border-bottom: 1px dashed var(--border);
+}
+.fn-row:last-child { border-bottom: none; }
+.fn-name { font-weight: 700; }
+.fn-prs { display: inline-flex; gap: 8px; flex-wrap: wrap; align-items: center; }

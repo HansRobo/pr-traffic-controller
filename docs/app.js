@@ -20,6 +20,10 @@ const state = {
   preset: "balanced",
   hideDraft: false,
   cluster: null,   // クラスタ詳細で見ているクラスタ
+  file: null,      // ファイルビューで開いているファイル
+  fileQuery: "",
+  filesSharedOnly: true,
+  filesConflictOnly: false,
   pr: null,        // サイドパネルで開いている PR
   minLevel: 2,     // グラフに出す干渉レベルの下限
 };
@@ -61,11 +65,16 @@ function relativeTime(iso) {
 
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
-  for (const k of ["view", "repo", "line", "author", "preset", "cluster", "pr"]) {
+  for (const k of ["view", "repo", "line", "author", "preset", "cluster", "pr", "file"]) {
     if (p.get(k)) state[k] = p.get(k);
   }
   state.hideDraft = p.get("hideDraft") === "1";
   if (p.get("minLevel")) state.minLevel = Number(p.get("minLevel"));
+  if (state.file) {
+    // 共有されたリンクで必ずその行が出るよう、絞り込みを合わせる
+    state.fileQuery = state.file;
+    state.filesSharedOnly = false;
+  }
 }
 
 function writeHash() {
@@ -77,6 +86,7 @@ function writeHash() {
   if (state.preset !== "balanced") p.set("preset", state.preset);
   if (state.hideDraft) p.set("hideDraft", "1");
   if (state.cluster) p.set("cluster", state.cluster);
+  if (state.file) p.set("file", state.file);
   if (state.pr) p.set("pr", state.pr);
   if (state.minLevel !== 2) p.set("minLevel", String(state.minLevel));
   history.replaceState(null, "", "#" + p.toString());
@@ -508,6 +518,214 @@ function viewCluster() {
   return root;
 }
 
+
+// --- ビュー: ファイル・関数 -------------------------------------------
+//
+// 「このファイル（この関数）を誰がどの PR で触っているか」を軸にした見方。
+// PR を軸にした一覧では、同じ場所を複数人が別々に触っている状況が
+// 見えないため。関数の粒度は、干渉解析が出す「双方が変更した関数」から
+// 組み立てる（＝2件以上の PR が触った関数だけが並ぶ）。
+
+function buildFileIndex() {
+  const iv = DATA.interference[state.line] || { pairs: [] };
+  const prs = DATA.pull_requests.filter((p) => p.line === state.line && p.changed_files);
+  const files = new Map();
+  const get = (path) => {
+    if (!files.has(path)) {
+      files.set(path, { path, prs: new Set(), conflicts: [], functions: new Map() });
+    }
+    return files.get(path);
+  };
+
+  for (const p of prs) for (const f of p.changed_files) get(f).prs.add(p.id);
+
+  for (const pair of iv.pairs) {
+    if (pair.level === undefined) continue;
+    for (const cf of pair.conflict_files || []) {
+      get(cf.path).conflicts.push({ a: pair.a, b: pair.b, level: pair.level, structural: cf.structural });
+    }
+    for (const w of pair.warnings || []) {
+      if (w.kind !== "same_function_region") continue;
+      const rec = get(w.path);
+      for (const s of w.symbols || []) {
+        if (!rec.functions.has(s)) rec.functions.set(s, new Set());
+        rec.functions.get(s).add(pair.a);
+        rec.functions.get(s).add(pair.b);
+      }
+    }
+  }
+  return files;
+}
+
+function authorsOf(prIds) {
+  const seen = new Map();
+  for (const id of prIds) {
+    const pr = PR.get(id);
+    if (pr && !seen.has(pr.author)) seen.set(pr.author, pr.author_avatar_url);
+  }
+  return [...seen.entries()];
+}
+
+function viewFiles() {
+  const root = el("div");
+  const index = buildFileIndex();
+
+  root.append(el("p", { class: "hint" },
+    "同じファイル・同じ関数を、誰がどの PR で触っているかを見る画面です。"
+    + "関数の行は、干渉解析が「双方が変更した」と判定したものだけが並びます。"));
+
+  // 絞り込み
+  const bar = el("div", { class: "filters" });
+  bar.append(el("input", {
+    type: "search", id: "file-q", placeholder: "パスで絞り込み", value: state.fileQuery || "",
+    oninput: (e) => { state.fileQuery = e.target.value; renderFileList(); },
+  }));
+  bar.append(el("label", {},
+    el("input", {
+      type: "checkbox", checked: state.filesSharedOnly !== false,
+      onchange: (e) => { state.filesSharedOnly = e.target.checked; renderFileList(); },
+    }), "複数PRが触るファイルのみ"));
+  bar.append(el("label", {},
+    el("input", {
+      type: "checkbox", checked: !!state.filesConflictOnly,
+      onchange: (e) => { state.filesConflictOnly = e.target.checked; renderFileList(); },
+    }), "衝突があるファイルのみ"));
+  root.append(bar);
+
+  // ディレクトリ単位のまとめ（どの領域が混んでいるか）
+  const dirs = new Map();
+  for (const rec of index.values()) {
+    // ルート直下のファイルはディレクトリ名を持たない。
+    // そのまま先頭要素を使うと「pyproject.toml/」のような偽の
+    // ディレクトリが並ぶ。
+    const top = rec.path.includes("/") ? rec.path.split("/")[0] : "(ルート)";
+    if (!dirs.has(top)) dirs.set(top, { files: 0, prs: new Set(), conflicts: 0 });
+    const d = dirs.get(top);
+    d.files++;
+    for (const id of rec.prs) d.prs.add(id);
+    d.conflicts += rec.conflicts.length;
+  }
+  const dirRows = [...dirs.entries()].sort((a, b) => b[1].prs.size - a[1].prs.size).slice(0, 8);
+  const dirTable = el("table", {},
+    el("thead", {}, el("tr", {},
+      el("th", {}, "ディレクトリ"), el("th", { class: "num" }, "PR"),
+      el("th", { class: "num" }, "ファイル"), el("th", { class: "num" }, "衝突"))),
+    el("tbody", {}, ...dirRows.map(([name, d]) =>
+      el("tr", {},
+        el("td", {}, el("code", {}, name === "(ルート)" ? name : name + "/")),
+        el("td", { class: "num" }, d.prs.size),
+        el("td", { class: "num" }, d.files),
+        el("td", { class: "num" }, d.conflicts)))));
+  root.append(el("div", { class: "panel" },
+    el("h3", {}, "混んでいる領域", el("span", { class: "muted" }, "— トップレベルディレクトリ別")),
+    el("div", { class: "table-scroll" }, dirTable)));
+
+  const listHost = el("div", { class: "panel" },
+    el("h3", { id: "file-list-head" }, "ファイル"),
+    el("div", { class: "panel-body", id: "file-list" }));
+  root.append(listHost);
+
+  function renderFileList() {
+    const host = $("#file-list");
+    if (!host) return;
+    const q = (state.fileQuery || "").toLowerCase();
+    let rows = [...index.values()]
+      .filter((r) => !q || r.path.toLowerCase().includes(q))
+      .filter((r) => state.filesSharedOnly === false || r.prs.size > 1)
+      .filter((r) => !state.filesConflictOnly || r.conflicts.length)
+      .filter((r) => !state.author || [...r.prs].some((id) => PR.get(id)?.author === state.author))
+      .sort((a, b) =>
+        b.conflicts.length - a.conflicts.length
+        || b.prs.size - a.prs.size
+        || a.path.localeCompare(b.path));
+
+    const head = $("#file-list-head");
+    if (head) head.replaceChildren(
+      document.createTextNode("ファイル"),
+      el("span", { class: "muted" }, `— ${rows.length}件`));
+
+    host.replaceChildren();
+    if (!rows.length) { host.append(el("div", { class: "empty" }, "該当なし")); return; }
+
+    for (const rec of rows.slice(0, 200)) {
+      const open = state.file === rec.path;
+      const authors = authorsOf(rec.prs);
+      const summary = el("summary", {},
+        el("code", {}, rec.path),
+        el("span", { class: "pr-badges" },
+          el("span", { class: "badge" }, `${rec.prs.size} PR`),
+          rec.conflicts.length
+            ? el("span", { class: "badge warn" }, `衝突 ${rec.conflicts.length}`) : null,
+          rec.functions.size
+            ? el("span", { class: "badge warn" }, `同一関数 ${rec.functions.size}`) : null),
+        el("span", { class: "file-authors" },
+          ...authors.slice(0, 6).map(([a, av]) => authorChip(a, av, { compact: true })),
+          authors.length > 6 ? el("span", { class: "small muted" }, `+${authors.length - 6}`) : null));
+
+      const body = el("div", { class: "file-body" });
+
+      // 関数ごと（2件以上が触ったもの）
+      if (rec.functions.size) {
+        const fl = el("div", {});
+        for (const [fn, ids] of [...rec.functions.entries()].sort((a, b) => b[1].size - a[1].size)) {
+          fl.append(el("div", { class: "fn-row" },
+            el("code", { class: "fn-name" }, fn),
+            el("span", { class: "small muted" }, `${ids.size} PR`),
+            el("span", { class: "fn-prs" },
+              ...[...ids].sort().map((id) => prOpenButton(id)))));
+        }
+        body.append(el("section", {}, el("h4", {}, "双方が変更した関数・クラス"), fl));
+      }
+
+      // このファイルで起きている衝突
+      if (rec.conflicts.length) {
+        const cl = el("div", {});
+        for (const c of rec.conflicts.sort((x, y) => y.level - x.level)) {
+          cl.append(el("div", { class: "fn-row" },
+            levelChip(c.level),
+            c.structural ? el("span", { class: "badge warn" }, "構造") : null,
+            el("span", { class: "fn-prs" }, prOpenButton(c.a), el("span", { class: "muted" }, "↔"), prOpenButton(c.b))));
+        }
+        body.append(el("section", {}, el("h4", {}, "このファイルで起きている衝突"), cl));
+      }
+
+      // 触っている PR
+      body.append(el("section", {},
+        el("h4", {}, `このファイルを変更する PR（${rec.prs.size}件）`),
+        ...[...rec.prs].sort().map((id) => prCard(id))));
+
+      host.append(el("details", {
+        open,
+        ontoggle: (e) => { if (e.target.open) { state.file = rec.path; writeHash(); } },
+      }, summary, body));
+    }
+    if (rows.length > 200) {
+      host.append(el("p", { class: "hint" }, `${rows.length - 200} 件を省略しました。パスで絞り込んでください。`));
+    }
+  }
+
+  // 初回描画は DOM 挿入後に行う
+  queueMicrotask(renderFileList);
+  return root;
+}
+
+/** ファイルビューへ飛ぶリンク。 */
+function fileLink(path) {
+  return el("button", {
+    class: "pr-open",
+    title: "このファイルを触っている PR を見る",
+    onclick: (e) => {
+      e.stopPropagation();
+      closePanel();
+      state.view = "files";
+      state.file = path;
+      state.fileQuery = path;
+      state.filesSharedOnly = false;
+      render();
+    },
+  }, path);
+}
+
 // --- ビュー: 干渉一覧 --------------------------------------------------
 
 function viewConflicts() {
@@ -550,9 +768,9 @@ function viewConflicts() {
   for (const p of rows) {
     const files = p.conflict_files && p.conflict_files.length
       ? p.conflict_files.map((f) =>
-          el("div", {}, el("code", {}, f.path),
+          el("div", {}, fileLink(f.path),
             f.structural ? el("span", { class: "badge warn", title: `ステージ ${f.stages.join(",")}` }, "構造") : null))
-      : (p.overlap_files || []).slice(0, 4).map((f) => el("div", { class: "muted" }, el("code", {}, f)));
+      : (p.overlap_files || []).slice(0, 4).map((f) => el("div", { class: "muted" }, fileLink(f)));
     const warns = (p.warnings || []).map((w) =>
       el("div", { class: "small" },
         el("span", { class: "badge warn" }, w.kind === "same_function_region" ? "同一関数" : "依存/設定"),
@@ -1013,7 +1231,7 @@ function prDetail(id) {
           other ? el("div", {}, authorChip(other.author, other.author_avatar_url)) : null),
         el("td", { class: "small" },
           (r.conflict_files || []).map((f) =>
-            el("div", {}, el("code", {}, f.path),
+            el("div", {}, fileLink(f.path),
               f.structural ? el("span", { class: "badge warn" }, "構造") : null)),
           !r.conflict_files?.length && r.overlap_files
             ? el("div", { class: "muted" }, el("code", {}, r.overlap_files.slice(0, 3).join(", ")))
@@ -1041,7 +1259,7 @@ function prDetail(id) {
       el("h4", {}, "ベースとの衝突（まず rebase が必要）"),
       el("ul", { class: "tight small" },
         ...pr.base_conflict_files.map((f) =>
-          el("li", {}, el("code", {}, f.path), " ",
+          el("li", {}, fileLink(f.path), " ",
             el("span", { class: "muted" }, `ステージ ${f.stages.join(",")}`))))));
   }
 
@@ -1075,7 +1293,8 @@ function prDetail(id) {
       el("h4", {}, `変更ファイル（${pr.changed_files.length}件）`),
       el("details", {},
         el("summary", { class: "muted" }, "一覧を開く"),
-        el("ul", { class: "tight small mono" }, ...pr.changed_files.map((f) => el("li", {}, f))))));
+        el("ul", { class: "tight small mono" },
+          ...pr.changed_files.map((f) => el("li", {}, fileLink(f)))))));
   }
   return out;
 }
@@ -1139,7 +1358,7 @@ function viewPr() {
 
 // --- 描画 --------------------------------------------------------------
 
-const VIEWS = { board: viewBoard, cluster: viewCluster, pr: viewPr, conflicts: viewConflicts, stacks: viewStacks, mine: viewMine, table: viewTable };
+const VIEWS = { board: viewBoard, cluster: viewCluster, pr: viewPr, files: viewFiles, conflicts: viewConflicts, stacks: viewStacks, mine: viewMine, table: viewTable };
 
 function render() {
   writeHash();
@@ -1186,6 +1405,7 @@ function setupChrome() {
     b.addEventListener("click", () => {
       state.view = b.dataset.view;
       state.cluster = null;
+      if (b.dataset.view !== "files") state.file = null;
       render();
     });
   }
