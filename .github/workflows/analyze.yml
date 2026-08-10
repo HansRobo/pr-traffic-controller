@@ -15,11 +15,11 @@ on:
   workflow_dispatch:
     inputs:
       repo:
-        description: 解析するリポジトリ（owner/name）
-        required: true
+        description: 解析するリポジトリ（owner/name）。空なら蓄積済みを全件更新して再デプロイ
+        required: false
       lines:
         description: 統合ブランチ（カンマ区切り）。分岐した統合先が複数あれば全て挙げる
-        required: true
+        required: false
         default: main
       include_forks:
         description: フォーク側の PR も含める

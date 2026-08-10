@@ -94,16 +94,27 @@ function prBadges(pr) {
   return out;
 }
 
-function prCard(id, { step = null, note = null } = {}) {
+function prCard(id, { step = null, note = null, reasons = null } = {}) {
   const pr = PR.get(id);
   if (!pr) return el("div", { class: "pr" }, id);
   const cls = ["pr", pr.is_draft ? "draft" : "", pr.base_conflict ? "base-conflict" : ""].join(" ");
+
+  // 理由が複数ある場合は箇条書きにする。1 行に連結すると読めなくなる。
+  const list = reasons && reasons.filter(Boolean);
+  const body = el("span", { class: "pr-title" },
+    pr.title,
+    note ? el("span", { class: "small muted" }, " — " + note) : null,
+    list && list.length
+      ? el("ul", { class: "tight small muted" }, ...list.map((r) => el("li", {}, r)))
+      : null,
+  );
+
   return el(
     "div",
     { class: cls },
     step !== null ? el("span", { class: "step-no" }, step) : null,
     el("span", { class: "num" }, el("a", { href: pr.url, target: "_blank", rel: "noopener" }, shortId(id))),
-    el("span", { class: "pr-title" }, pr.title, note ? el("span", { class: "small muted" }, " — " + note) : null),
+    body,
     ...prBadges(pr),
     el("span", { class: "author" }, pr.author),
   );
@@ -462,28 +473,36 @@ function viewMine() {
   const preset = o.presets[state.preset] || o.presets.balanced;
   const rank = new Map(preset.order.map((id, i) => [id, i]));
 
-  const ready = [], waiting = [], blocking = [], todo = [];
+  // 1 つの PR に理由が複数付くので、PR ごとに理由をまとめる。
+  // 理由の数だけカードを積むと、同じ PR が何度も並んで読めなくなる。
+  const ready = new Map(), waiting = new Map(), blocking = new Map(), todo = new Map();
+  const add = (box, id, reason) => {
+    if (!box.has(id)) box.set(id, []);
+    if (reason && !box.get(id).includes(reason)) box.get(id).push(reason);
+  };
 
   for (const p of mine) {
     const unmergedAncestors = p.stack.ancestors.filter((a) => PR.has(a));
-    if (p.base_conflict) todo.push([p.id, "ベースと衝突している。rebase が必要"]);
-    if (p.is_draft) todo.push([p.id, "Draft のまま"]);
-    if (p.review_decision === "REVIEW_REQUIRED") todo.push([p.id, "レビュー未実施"]);
-    if (p.review_decision === "CHANGES_REQUESTED") todo.push([p.id, "修正要求に対応が必要"]);
-    if (p.duplicate_of) todo.push([p.id, `${p.duplicate_of.map(shortId).join(",")} と同一コミット。どちらかをクローズ`]);
+    if (p.base_conflict) add(todo, p.id, "ベースと衝突している。rebase が必要");
+    if (p.is_draft) add(todo, p.id, "Draft のまま");
+    if (p.review_decision === "REVIEW_REQUIRED") add(todo, p.id, "レビュー未実施");
+    if (p.review_decision === "CHANGES_REQUESTED") add(todo, p.id, "修正要求に対応が必要");
+    if (p.duplicate_of) {
+      add(todo, p.id, `${p.duplicate_of.map(shortId).join(", ")} と同一コミット。どちらかをクローズ`);
+    }
 
     if (unmergedAncestors.length) {
-      waiting.push([p.id, `${unmergedAncestors.map(shortId).join(" → ")} が先にマージされる必要がある`]);
+      add(waiting, p.id, `${unmergedAncestors.map(shortId).join(" → ")} が先にマージされる必要がある`);
     } else if (!p.base_conflict) {
-      ready.push([p.id, null]);
+      add(ready, p.id, null);
     }
     if (p.blocks.length) {
       const who = [...new Set(p.blocks.map((b) => PR.get(b)?.author).filter(Boolean))];
-      blocking.push([p.id, `${p.blocks.length}件（${who.join(", ")}）がこの PR を待っている`]);
+      add(blocking, p.id, `${p.blocks.length}件（${who.join(", ")}）がこの PR を待っている`);
     }
   }
 
-  // 衝突相手のうち、自分が先に推奨されているもの
+  // 衝突相手のうち、自分が先に推奨されているもの／後のもの
   for (const pair of iv.pairs) {
     if (pair.level === undefined || pair.level < 2) continue;
     const [a, b] = [pair.a, pair.b];
@@ -492,21 +511,31 @@ function viewMine() {
     const other = mineSide === a ? b : a;
     if (PR.get(other)?.author === state.author) continue;
     const label = `${shortId(other)}（${PR.get(other)?.author}）と L${pair.level} 衝突`;
-    if ((rank.get(mineSide) ?? 0) < (rank.get(other) ?? 0)) blocking.push([mineSide, label + " — あなたが先の推奨"]);
-    else waiting.push([mineSide, label + " — 相手が先の推奨"]);
+    if ((rank.get(mineSide) ?? 0) < (rank.get(other) ?? 0)) {
+      add(blocking, mineSide, label + " — あなたが先の推奨");
+    } else {
+      add(waiting, mineSide, label + " — 相手が先の推奨");
+    }
   }
 
-  const box = (title, items, hint) =>
-    el("div", { class: "panel" },
-      el("h3", {}, title, el("span", { class: "muted" }, `— ${items.length}件`)),
+  // 待つ理由がある PR は「今すぐ流せる」ではない
+  for (const id of waiting.keys()) ready.delete(id);
+
+  const box = (title, map, hint) => {
+    const entries = [...map.entries()].sort(
+      (x, y) => (rank.get(x[0]) ?? 1e9) - (rank.get(y[0]) ?? 1e9),
+    );
+    return el("div", { class: "panel" },
+      el("h3", {}, title, el("span", { class: "muted" }, `— ${entries.length}件`)),
       el("div", { class: "panel-body" },
         hint ? el("p", { class: "hint" }, hint) : null,
-        items.length
-          ? items.map(([id, note]) => prCard(id, { note }))
+        entries.length
+          ? entries.map(([id, reasons]) => prCard(id, { reasons }))
           : el("div", { class: "empty" }, "なし")));
+  };
 
   const grid = el("div", { class: "grid cols-2" });
-  grid.append(box("今すぐ流せる", ready, "ベース衝突がなく、待つべき親もない"));
+  grid.append(box("今すぐ流せる", ready, "ベース衝突がなく、待つべき親も衝突相手もない"));
   grid.append(box("あなたが待たせている", blocking, "他の人の作業がここで止まっている"));
   grid.append(box("あなたが待っている", waiting, null));
   grid.append(box("あなたのTODO", todo, null));
