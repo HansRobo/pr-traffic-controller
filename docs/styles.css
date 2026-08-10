@@ -480,3 +480,39 @@ ul.tight li { margin: 2px 0; }
 
 /* 差分を読むには幅が要る。パネルを広げ、狭い画面では全幅にする。 */
 .side-panel { width: min(880px, 100vw); }
+
+/* スタック依存は「意図された構造」なので、干渉より控えめに描く */
+.graph .edge.intentional { stroke: var(--ink-3); stroke-dasharray: 4 3; stroke-width: 1.2; }
+.legend-stack { border-top: 2px dashed var(--ink-3) !important; }
+
+/* --- マージ手順 ----------------------------------------------------- */
+.next-up {
+  margin: 0 0 12px; padding: 9px 12px; border-radius: 6px;
+  background: var(--ok-bg); border: 1px solid var(--ok); font-weight: 600;
+}
+.seq-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding-left: 8px; border-left: 3px solid transparent;
+}
+.seq-row.clean { border-left-color: var(--ok); }
+.seq-row.conflict { border-left-color: var(--warning); }
+.seq-row.rebase { border-left-color: var(--critical); }
+.seq-no {
+  flex: 0 0 auto; font-family: var(--mono); font-size: 12px; color: var(--ink-3);
+  min-width: 26px; text-align: right; padding-top: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.seq-mark { flex: 0 0 auto; font-size: 14px; padding-top: 10px; }
+.seq-row.clean .seq-mark { color: var(--ok); }
+.seq-row.conflict .seq-mark { color: var(--warning); }
+.seq-row.rebase .seq-mark { color: var(--critical); }
+.seq-main { flex: 1 1 auto; min-width: 0; }
+.seq-main .pr { margin-bottom: 2px; }
+.seq-dep { padding: 0 0 4px 10px; }
+.seq-tag { flex: 0 0 auto; padding-top: 12px; }
+
+.cluster-cards { display: flex; gap: 10px; flex-wrap: wrap; }
+.cluster-card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+  padding: 10px 12px; text-align: left; min-width: 190px;
+}

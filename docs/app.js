@@ -26,6 +26,7 @@ const state = {
   filesConflictOnly: false,
   pr: null,        // サイドパネルで開いている PR
   minLevel: 2,     // グラフに出す干渉レベルの下限
+  showStack: true, // 意図したスタック依存を文脈として描くか
 };
 
 let INDEX = null;
@@ -342,7 +343,8 @@ function viewBoard() {
     el("div", {}, el("strong", {}, cleanCount), "そのままマージできる"),
     el("div", {}, el("strong", {}, conflictCount), "解決が必要"),
     el("div", {}, el("strong", {}, rebaseCount), "先にrebaseが必要"),
-    el("div", {}, el("strong", {}, independent.size), "独立にマージ可能"),
+    el("div", { title: "他のPRとの意図しない干渉が無い。スタックの親を待つものは含む" },
+      el("strong", {}, independent.size), "干渉なし"),
     undetermined.size
       ? el("div", { title: "ベースと衝突していて着地させられないため、他PRとの干渉を判定できていない" },
           el("strong", {}, undetermined.size), "干渉は判定不能")
@@ -389,7 +391,12 @@ function viewBoard() {
               title: "ベースと衝突しているため干渉を判定できていない。rebase して初めて分かる",
             }, "判定不能")
           : independent.has(id)
-          ? el("span", { class: "badge", title: "他のどのPRとも干渉しないので、いつマージしてもよい" }, "独立")
+          ? ((PR.get(id) || {}).stack || {}).depth > 0
+              ? el("span", {
+                  class: "badge",
+                  title: "意図しない干渉は無い。スタックの親を待つ必要があるだけ",
+                }, "スタック順のみ")
+              : el("span", { class: "badge", title: "他のどのPRとも干渉しないので、いつマージしてもよい" }, "独立")
           : cid
             ? el("button", {
                 class: "badge cluster-link",
@@ -451,8 +458,8 @@ function viewBoard() {
           ...authors.slice(0, 5).map(([a, av]) => authorChip(a, av, { compact: true })))));
     }
     root.append(el("div", { class: "panel" },
-      el("h3", {}, "順序を議論すべき ", el("strong", {}, String(o.clusters.length)), " クラスタ",
-        el("span", { class: "muted" }, "— この中だけ順序が意味を持つ")),
+      el("h3", {}, "調整が要る ", el("strong", {}, String(o.clusters.length)), " クラスタ",
+        el("span", { class: "muted" }, "— 意図しない干渉で結ばれた範囲。ここだけ話し合いが要る")),
       el("div", { class: "panel-body" }, cl)));
   }
 
@@ -528,8 +535,9 @@ function viewCluster() {
   ));
 
   root.append(el("p", { class: "hint" },
-    "このクラスタの中でだけ順序が問題になります。他のクラスタや"
-    + "独立にマージ可能な PR とは互いに干渉しないので、どの順番でマージしても構いません。"
+    "意図しない干渉で結ばれた範囲です。ここだけ調整が要ります。"
+    + "他のクラスタの PR とは干渉しないので、どの順番でマージしても構いません。"
+    + "（スタックの親子は作者が意図した依存なので、干渉には数えていません）"
   ));
   if (authors.length) {
     const who = el("div", { class: "filters" }, el("span", { class: "small muted" }, "関係者:"));
@@ -542,7 +550,8 @@ function viewCluster() {
 
   // グラフ
   root.append(el("div", { class: "panel" },
-    el("h3", {}, "干渉グラフ", el("span", { class: "muted" }, "— ノードをクリックすると詳細が開き、その PR の辺だけが強調されます")),
+    el("h3", {}, "干渉グラフ",
+      el("span", { class: "muted" }, "— 上側の弧が意図しない干渉。ノードをクリックすると詳細が開きます")),
     el("div", { class: "panel-body" },
       graphFilters(),
       interferenceGraph(members, { height: 300 }))));
@@ -1167,10 +1176,14 @@ function interferenceGraph(ids, { height = 300 } = {}) {
     (p) => p.level !== undefined && p.level >= state.minLevel
       && idx.has(p.a) && idx.has(p.b),
   );
+  // スタックは作者が意図した依存で、このビューアが解決を助けたい
+  // 「意図しない干渉」ではない。文脈として薄く描き、消せるようにする。
   const stacks = [];
-  for (const id of nodes) {
-    for (const anc of (PR.get(id)?.stack.ancestors) || []) {
-      if (idx.has(anc)) stacks.push({ from: anc, to: id });
+  if (state.showStack !== false) {
+    for (const id of nodes) {
+      for (const anc of (PR.get(id)?.stack.ancestors) || []) {
+        if (idx.has(anc)) stacks.push({ from: anc, to: id });
+      }
     }
   }
 
@@ -1220,7 +1233,7 @@ function interferenceGraph(ids, { height = 300 } = {}) {
     const span = Math.abs(x2 - x1);
     const r = Math.min(span / 2, midY - NH / 2 - 14);
     g.append(svg("path", {
-      class: "edge stack" + (touches(s.from, s.to) ? "" : " dim"),
+      class: "edge stack intentional" + (touches(s.from, s.to) ? "" : " dim"),
       "marker-end": "url(#arrow)",
       d: `M${x1},${midY + NH / 2} A${span / 2},${r} 0 0,${x2 > x1 ? 0 : 1} ${x2},${midY + NH / 2}`,
     }, svg("title", {}, `${shortId(s.from)} → ${shortId(s.to)} — ${shortId(s.from)} がマージされるまで ${shortId(s.to)} はマージできない`)));
@@ -1255,7 +1268,7 @@ function interferenceGraph(ids, { height = 300 } = {}) {
   wrap.append(el("div", { class: "graph-wrap" }, g));
   wrap.append(el("div", { class: "graph-legend" },
     el("span", {}, el("i", { style: "border-color: var(--l2)" }), "上側の弧 = 衝突（無向。順序は誰が払うかを決めるだけ）"),
-    el("span", {}, el("i", { style: "border-color: var(--ink-2)" }), "下側の矢印 = スタック依存（親が先。真のブロック）"),
+    el("span", {}, el("i", { class: "legend-stack" }), "下側の矢印 = スタック依存（作者が意図した順序。干渉ではない）"),
     el("span", {}, "枠が緑 = Approved / 破線 = Draft / 赤 = 要rebase"),
   ));
   if (focus) {
@@ -1276,6 +1289,11 @@ function graphFilters() {
       title: LEVEL_DESC[lv],
     }, label));
   }
+  row.append(el("label", {},
+    el("input", {
+      type: "checkbox", checked: state.showStack !== false,
+      onchange: (e) => { state.showStack = e.target.checked; render(); },
+    }), "スタック依存も表示"));
   return row;
 }
 

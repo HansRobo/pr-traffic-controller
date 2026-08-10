@@ -185,11 +185,19 @@ def build_clusters(
     *,
     edge_level: Level = CLUSTER_EDGE_LEVEL,
 ) -> tuple[list[Cluster], list[str]]:
-    """干渉グラフの連結成分に分解する。
+    """**意図しない干渉**の連結成分に分解する。
 
-    辺 = L1 以上の衝突ペア ∪ スタック親子辺。
-    連結成分が「順序を議論すべき単位」であり、成分をまたぐ PR は
-    **並行に流してよい**。これが交通整理の最大の成果物になる。
+    辺は衝突ペアだけで張る。**スタックの親子辺は使わない。**
+    スタックは作者が意図して積んだ依存であり、順序はすでに決まっている。
+    これを連結成分に混ぜると、衝突が 1 件も無いスタック鎖が
+    「順序を議論すべきクラスタ」として現れてしまう —— 議論すべきことは
+    何も無いのに。
+
+    スタックの順序制約は `_predecessors` がハード制約として別途扱うので、
+    クラスタから外しても順序が壊れることはない。
+
+    連結成分が「調整が要る単位」であり、成分をまたぐ PR に
+    意図しない干渉は無い。
     """
     parent = {i: i for i in ids}
 
@@ -209,18 +217,8 @@ def build_clusters(
     for p in pairs:
         if p.a not in idset or p.b not in idset:
             continue
-        connect = (p.level is not None and p.level >= edge_level) or p.relation is Relation.STACKED
-        if connect:
+        if p.level is not None and p.level >= edge_level:
             union(p.a, p.b)
-
-    if graph is not None:
-        for pid in ids:
-            res = graph.resolutions.get(pid)
-            if not res:
-                continue
-            for anc in res.ancestors:
-                if anc in idset:
-                    union(pid, anc)
 
     groups: dict[str, list[str]] = {}
     for i in ids:
@@ -399,6 +397,32 @@ def _greedy_with_local_search(
     return seq
 
 
+def enforce_predecessors(seq: list[str], preds: dict[str, set[str]]) -> list[str]:
+    """先行制約を満たすように並べ直す（元の並びはできるだけ保つ）。
+
+    クラスタは意図しない干渉だけで作るので、スタックの親子が別々の
+    グループに分かれることがある。グループを連結しただけでは親が子より
+    後ろに来うるため、最後に必ずここを通す。
+
+    元の順序をタイブレークに使う Kahn 法なので、制約に反しない限り
+    入力の並びは変わらない。
+    """
+    priority = {pid: i for i, pid in enumerate(seq)}
+    remaining = {pid: {a for a in preds.get(pid, set()) if a in priority} for pid in seq}
+    out: list[str] = []
+    placed: set[str] = set()
+
+    while remaining:
+        ready = [pid for pid, need in remaining.items() if not (need - placed)]
+        if not ready:  # 循環。決定的に打ち切る
+            ready = [min(remaining, key=lambda x: priority[x])]
+        pick = min(ready, key=lambda x: priority[x])
+        out.append(pick)
+        placed.add(pick)
+        del remaining[pick]
+    return out
+
+
 def total_cost(
     seq: list[str],
     ctx: dict[str, PRContext],
@@ -451,7 +475,8 @@ def compute_metrics(
             m.blast_radius += 1
             m.regret += cost(ctx[p], ctx[q], pair, w) - cost(ctx[q], ctx[p], pair, w)
             m.rebase_load += SEVERITY[pair.level] * pair_units(pair) * (1.0 + ctx[q].size)
-        m.blast_radius += ctx[p].blocks
+        # スタックの子孫は「意図した依存」なので、意図しない干渉の
+        # 広がりを測る blast_radius には足さない（blocks が別途ある）。
         out[p] = m
     return out
 
@@ -522,6 +547,8 @@ def plan_line(
         # 判定不能なものは後ろに置く（rebase しないとそもそも流せない）。
         seq.extend(sorted(independent, key=lambda m: -urgency(ctx[m], w)))
         seq.extend(sorted(undetermined, key=lambda m: -urgency(ctx[m], w)))
+        # クラスタをまたぐスタック親子があるので、最後に必ず制約を通す
+        seq = enforce_predecessors(seq, preds)
         plan.presets[name] = {
             "order": seq,
             "optimal": exact,
