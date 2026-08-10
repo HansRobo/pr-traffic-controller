@@ -112,6 +112,15 @@ def build(root: Path) -> RepoFixture:
     r.write("base.py", _long_function("base_fn", "base = 0", 30))
     r.write("other.py", _long_function("other_fn", "other = 0", 5))
     r.write("requirements.txt", "numpy==1.0\ntorch==2.0\npyyaml==6.0\n")
+    r.write("notes.md", "# Notes\n\n元の説明\n")
+    # コメントだけの衝突を作るための、行として独立したコメント
+    r.write(
+        "commented.py",
+        "# 説明の 1 行目\n"
+        "# 説明の 2 行目\n"
+        "\n"
+        + _long_function("worker", "value = 0", 5),
+    )
     r.commit("main: initial")
 
     def variant(branch: str, path: str, old: str, new: str, msg: str) -> None:
@@ -171,6 +180,24 @@ def build(root: Path) -> RepoFixture:
     t = (root / "base.py").read_text().replace("x = x + 25  # pad", "x = x + 25  # touched by v", 1)
     r.write("base.py", t)
     r.commit("v: shared head (conflicting) + base tail (auto-merges)")
+
+    # o / p: 行として独立したコメントを別々に書き換える
+    #        -> L2（git はマージできない）だが中身はコメントだけ
+    variant("o", "commented.py", "# 説明の 1 行目", "# 説明を o が書き換えた", "o: comment")
+    variant("p", "commented.py", "# 説明の 1 行目", "# 説明を p が書き換えた", "p: comment")
+
+    # w / x: コード + 末尾コメントの行でぶつかる -> コメントだけとは見なさない
+    #        （行にコードが含まれる以上、片側を選ぶ判断はコードの判断になる）
+    variant("w", "commented.py", "value = 0", "value = 1  # w が変更", "w: code line")
+    variant("x", "commented.py", "value = 0", "value = 2  # x が変更", "x: code line")
+
+    # q / s: 文書ファイルだけの衝突
+    r.branch_from("q")
+    r.write("notes.md", "# Notes\n\nq の説明\n")
+    r.commit("q: docs")
+    r.branch_from("s")
+    r.write("notes.md", "# Notes\n\ns の説明\n")
+    r.commit("s: docs")
 
     r.git("checkout", "-q", "main")
     return r

@@ -176,3 +176,45 @@ class TestPairwiseSweep:
         r = interference.analyze_pair(repo, line, parent, child)
         assert r.relation is Relation.STACKED
         assert r.level is None
+
+
+class TestCommentOnlyConflicts:
+    """コメント・文書だけの衝突は、等級は同じでも扱いを分ける。"""
+
+    def test_comment_conflict_is_flagged(self, repo, line):
+        r = pair(repo, line, "o", "p")
+        assert r.level is Level.L2, "git はマージできないので衝突は衝突"
+        assert r.conflict_files[0].comment_only, "中身はコメントだけ"
+        assert r.is_comment_only
+
+    def test_code_conflict_is_not_flagged(self, repo, line):
+        r = pair(repo, line, "b", "d")
+        assert r.level is Level.L2
+        assert not r.conflict_files[0].comment_only
+        assert not r.is_comment_only
+
+    def test_code_line_with_trailing_comment_is_code(self, repo, line):
+        """コード + 末尾コメントの行でぶつかった場合は「実コード」とする。
+
+        行にコードが含まれる以上、片側を選ぶ判断はコードの判断になる。
+        保守的に倒す。
+        """
+        r = pair(repo, line, "w", "x")
+        assert r.level is Level.L2
+        assert not r.is_comment_only
+
+    def test_only_the_conflicting_lines_matter(self, repo, line):
+        """判定の対象は「衝突している箇所」だけ。
+
+        PR が他の場所でコードを変えていても、それが自動マージされて
+        いるなら衝突ではない。衝突しているのがコメントだけなら
+        コメントの衝突として扱う。
+        """
+        r = pair(repo, line, "o", "p")
+        assert r.overlap_files == {"commented.py"}
+        assert r.is_comment_only
+
+    def test_markdown_conflict_is_documentation(self, repo, line):
+        r = pair(repo, line, "q", "s")
+        assert r.level is Level.L2
+        assert r.is_comment_only

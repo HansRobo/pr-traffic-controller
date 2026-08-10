@@ -223,6 +223,16 @@ function levelChip(level) {
   return el("span", { class: `lv lv-${level}`, title: LEVEL_DESC[level] }, "L" + level);
 }
 
+/** コメント・文書だけの衝突であることを示す印。
+ *  等級は下げない（git はマージできない）が、解決の負担がまるで違う。 */
+function commentOnlyBadge() {
+  return el("span", {
+    class: "badge comment-only",
+    title: "衝突しているのはコメント・文書だけ。git はマージできないが、"
+      + "両方残すかどちらかを選べば済むことがほとんど",
+  }, "コメントのみ");
+}
+
 /** 解析側のプリセット識別子 -> 画面に出す名前。 */
 const PRESET_LABEL = {
   "balanced": "バランス重視",
@@ -390,9 +400,13 @@ function viewBoard() {
       mark = "⏸"; cls = "rebase";
       note = "ベースと衝突しているので、まず rebase する";
     } else if (s.result === "conflict") {
-      mark = "⚠"; cls = "conflict";
       const files = (s.conflict_files || []).map((f) => f.path.split("/").pop());
-      note = `この時点で衝突する: ${files.slice(0, 3).join(", ")}${files.length > 3 ? " ほか" : ""}`;
+      const commentOnly = (s.conflict_files || []).length
+        && (s.conflict_files || []).every((f) => f.comment_only);
+      mark = commentOnly ? "△" : "⚠";
+      cls = commentOnly ? "conflict-light" : "conflict";
+      note = (commentOnly ? "コメント・文書だけの衝突: " : "この時点で衝突する: ")
+        + `${files.slice(0, 3).join(", ")}${files.length > 3 ? " ほか" : ""}`;
     } else {
       mark = "✓"; cls = "clean";
       note = "そのままマージできる";
@@ -606,7 +620,7 @@ function viewCluster() {
       const xHunks = (x.conflict_files || []).filter((f) => f.hunks && f.hunks.length);
       const xActions = el("td", {});
       const xRow = el("tr", {},
-        el("td", {}, levelChip(x.level)),
+        el("td", {}, levelChip(x.level), x.comment_only ? commentOnlyBadge() : null),
         el("td", {}, prOpenButton(x.a)),
         el("td", {}, prOpenButton(x.b)),
         el("td", { class: "small" },
@@ -729,7 +743,8 @@ function buildFileIndex() {
     if (isHidden(pair.a) || isHidden(pair.b)) continue;
     for (const cf of pair.conflict_files || []) {
       get(cf.path).conflicts.push({
-        a: pair.a, b: pair.b, level: pair.level, structural: cf.structural, file: cf,
+        a: pair.a, b: pair.b, level: pair.level, structural: cf.structural,
+        comment_only: cf.comment_only, file: cf,
       });
     }
     for (const w of pair.warnings || []) {
@@ -879,6 +894,7 @@ function viewFiles() {
           cl.append(el("div", { class: "fn-row" },
             levelChip(c.level),
             c.structural ? el("span", { class: "badge warn" }, "構造") : null,
+            c.comment_only ? commentOnlyBadge() : null,
             el("span", { class: "fn-prs" },
               prOpenButton(c.a), el("span", { class: "muted" }, "↔"), prOpenButton(c.b))));
         }
@@ -955,7 +971,11 @@ function viewConflicts() {
     .filter((p) => p.level !== undefined && p.level >= 1)
     .filter((p) => !isHidden(p.a) && !isHidden(p.b))
     .filter((p) => !state.author || [p.a, p.b].some((x) => PR.get(x)?.author === state.author))
-    .sort((a, b) => b.level - a.level || (b.conflict_files || []).length - (a.conflict_files || []).length);
+    // 実コードの衝突を先に。コメントだけのものは同じ等級でも後ろへ。
+    .sort((a, b) =>
+      (!!a.comment_only - !!b.comment_only)
+      || b.level - a.level
+      || (b.conflict_files || []).length - (a.conflict_files || []).length);
 
   if (!rows.length) return root.append(el("div", { class: "empty" }, "該当なし")), root;
 
@@ -977,7 +997,7 @@ function viewConflicts() {
     const withHunks = (p.conflict_files || []).filter((f) => f.hunks && f.hunks.length);
     const actions = el("td", {});
     const row = el("tr", {},
-      el("td", {}, levelChip(p.level)),
+      el("td", {}, levelChip(p.level), p.comment_only ? commentOnlyBadge() : null),
       el("td", {}, prLink(p.a)),
       el("td", {}, prLink(p.b)),
       el("td", { class: "small" }, files),
@@ -1311,7 +1331,8 @@ function interferenceGraph(ids, { height = 300 } = {}) {
     const r = Math.min(span / 2, midY - NH / 2 - 14);
     const dir = -1;
     g.append(svg("path", {
-      class: `edge lv${c.level}` + (touches(c.a, c.b) ? "" : " dim"),
+      class: `edge lv${c.level}` + (c.comment_only ? " comment-only" : "")
+        + (touches(c.a, c.b) ? "" : " dim"),
       d: `M${x1},${midY + dir * (NH / 2)} A${span / 2},${r} 0 0,${x2 > x1 ? 1 : 0} ${x2},${midY + dir * (NH / 2)}`,
     }, svg("title", {}, `${shortId(c.a)} ↔ ${shortId(c.b)} — L${c.level} 衝突`
       + `（順序は「誰が rebase するか」を決めるだけ）`)));
@@ -1359,6 +1380,7 @@ function interferenceGraph(ids, { height = 300 } = {}) {
   wrap.append(el("div", { class: "graph-legend" },
     el("span", {}, el("i", { style: "border-color: var(--l2)" }), "上側の弧 = 衝突（無向。順序は誰が払うかを決めるだけ）"),
     el("span", {}, el("i", { class: "legend-stack" }), "下側の矢印 = スタック依存（作者が意図した順序。干渉ではない）"),
+    el("span", {}, el("i", { class: "legend-comment" }), "点線 = コメント・文書だけの衝突"),
     el("span", {}, "枠が緑 = Approved / 破線 = Draft / 赤 = 要rebase"),
   ));
   if (focus) {
@@ -1409,7 +1431,7 @@ function pairsFor(id) {
   return iv.pairs
     .filter((p) => (p.a === id || p.b === id) && p.level !== undefined && p.level >= 1)
     .map((p) => ({ ...p, other: p.a === id ? p.b : p.a }))
-    .sort((x, y) => y.level - x.level);
+    .sort((x, y) => (!!x.comment_only - !!y.comment_only) || y.level - x.level);
 }
 
 
@@ -1557,7 +1579,7 @@ function prDetail(id) {
       const rHunks = (r.conflict_files || []).filter((f) => f.hunks && f.hunks.length);
       const rActions = el("td", {});
       const rRow = el("tr", {},
-        el("td", {}, levelChip(r.level)),
+        el("td", {}, levelChip(r.level), r.comment_only ? commentOnlyBadge() : null),
         el("td", {}, prOpenButton(r.other),
           el("div", { class: "small muted" }, other ? other.title.slice(0, 44) : ""),
           other ? el("div", {}, authorChip(other.author, other.author_avatar_url)) : null),

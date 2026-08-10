@@ -21,7 +21,7 @@ from __future__ import annotations
 import itertools
 from typing import TYPE_CHECKING, Iterable
 
-from . import semantic
+from . import codekind, semantic
 from .model import (
     Candidate,
     ConflictFile,
@@ -64,6 +64,7 @@ def conflict_files_from(
                 stages=result.stages.get(path, frozenset()),
                 types=tuple(sorted(types_by_path.get(path, ()))),
                 hunks=hunks,
+                comment_only=codekind.classify_hunks(path, hunks),
             )
         )
     return tuple(out)

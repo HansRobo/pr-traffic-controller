@@ -41,6 +41,12 @@ SEVERITY = {
 #: セマンティック警告が付いたペアの倍率。
 SEMANTIC_MULTIPLIER = 1.5
 
+#: 衝突箇所がコメント・文書だけのときの倍率。
+#: git はマージできないので衝突は衝突だが、解決は「両方残す」か
+#: 「どちらかを選ぶ」で済むことがほとんどで、実コードの衝突とは
+#: 負担がまるで違う。等級は下げず、コストだけ下げる。
+COMMENT_ONLY_MULTIPLIER = 0.2
+
 #: 厳密 DP を使うクラスタサイズの上限。これを超えたら貪欲＋局所探索。
 #: 2^18 × 18 の倍精度配列（約 38MB）と同数の遷移で、数秒で終わる。
 EXACT_DP_LIMIT = 18
@@ -167,6 +173,8 @@ def cost(p: PRContext, q: PRContext, pair: PairResult | None, w: Weights) -> flo
         sev = SEVERITY[pair.level]
         if pair.warnings:
             sev *= SEMANTIC_MULTIPLIER
+        if pair.is_comment_only:
+            sev *= COMMENT_ONLY_MULTIPLIER
         conflict = (
             sev
             * pair_units(pair)
@@ -474,7 +482,10 @@ def compute_metrics(
                 continue
             m.blast_radius += 1
             m.regret += cost(ctx[p], ctx[q], pair, w) - cost(ctx[q], ctx[p], pair, w)
-            m.rebase_load += SEVERITY[pair.level] * pair_units(pair) * (1.0 + ctx[q].size)
+            load = SEVERITY[pair.level] * pair_units(pair) * (1.0 + ctx[q].size)
+            if pair.is_comment_only:
+                load *= COMMENT_ONLY_MULTIPLIER
+            m.rebase_load += load
         # スタックの子孫は「意図した依存」なので、意図しない干渉の
         # 広がりを測る blast_radius には足さない（blocks が別途ある）。
         out[p] = m

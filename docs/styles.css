@@ -542,3 +542,10 @@ details.loc[open] > summary { border-bottom: 1px solid var(--border); border-rad
 .loc-hunk { margin-bottom: 6px; }
 .loc-hunk-loc { padding: 2px 2px 3px; }
 .loc-hunk .diff { border: 1px solid var(--border); border-radius: 5px; }
+
+/* コメント・文書だけの衝突は、等級は同じでも軽いことが分かるように */
+.badge.comment-only { color: var(--ink-2); border-style: dotted; }
+.seq-row.conflict-light { border-left-color: var(--ink-3); }
+.seq-row.conflict-light .seq-mark { color: var(--ink-2); }
+.graph .edge.comment-only { stroke-dasharray: 2 3; stroke-width: 1.1; }
+.legend-comment { border-top: 2px dotted var(--l2) !important; }

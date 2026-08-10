@@ -129,6 +129,13 @@ class ConflictFile:
     hunks: tuple = ()
     """衝突箇所の両側の中身（mergetree.ConflictHunk）。"""
 
+    comment_only: bool = False
+    """衝突している中身がコメント・文書だけか。
+
+    等級（L1〜L3）は下げない —— git がマージできない事実は変わらない。
+    解決の難易度とリスクが違うことを示す、直交した印として持つ。
+    """
+
     @property
     def is_structural(self) -> bool:
         return self.stages != frozenset({1, 2, 3})
@@ -175,6 +182,11 @@ class PairResult:
     @property
     def is_conflict(self) -> bool:
         return self.level is not None and self.level >= Level.L2
+
+    @property
+    def is_comment_only(self) -> bool:
+        """衝突箇所がすべてコメント・文書だけか。"""
+        return bool(self.conflict_files) and all(c.comment_only for c in self.conflict_files)
 
     def key(self) -> tuple[str, str]:
         return (self.a, self.b) if self.a <= self.b else (self.b, self.a)

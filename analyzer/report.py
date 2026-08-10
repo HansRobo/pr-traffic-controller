@@ -27,6 +27,8 @@ def _pair_dict(p: PairResult) -> dict:
     d: dict = {"a": p.a, "b": p.b, "relation": p.relation.value}
     if p.level is not None:
         d["level"] = int(p.level)
+    if p.is_comment_only:
+        d["comment_only"] = True
     if p.conflict_files:
         d["conflict_files"] = [
             {
@@ -34,6 +36,7 @@ def _pair_dict(p: PairResult) -> dict:
                 "stages": sorted(c.stages),
                 "types": list(c.types),
                 "structural": c.is_structural,
+                "comment_only": c.comment_only,
                 # ours = ペアの a 側、theirs = b 側（pair_merge の引数順）
                 "hunks": [
                     {
