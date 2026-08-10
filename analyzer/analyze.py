@@ -85,23 +85,45 @@ def run(
         lines = {dag.node_key(target, name): name for name in line_names}
         line_oids = {name: repo.rev_parse(f"origin/{name}") for name in line_names}
 
+        # そのブランチを base にしているオープン PR の数。
+        # 多くの PR が直接ぶら下がっているブランチは「スタックの親」ではなく
+        # **統合ラインそのもの**なので、勝手に他のラインへ寄せてはいけない。
+        base_counts: dict[str, int] = {}
+        for p in prs:
+            key = dag.node_key(p.base_repo, p.base_branch)
+            base_counts[key] = base_counts.get(key, 0) + 1
+
+        #: これ以上の PR が直接ぶら下がっていたら、独立した統合ラインとみなす
+        LINE_LIKE_THRESHOLD = 3
+        unlisted_lines: dict[str, int] = {}
+
         def infer_line(node: str) -> str | None:
-            """親 PR 不在のルートブランチが、どのラインに属するか推定する。"""
+            """親 PR 不在のルートブランチが、どのラインに属するか推定する。
+
+            推定してよいのは「スタックの親だった（が PR が閉じられた）」
+            ような枝だけ。多数の PR がぶら下がっているブランチは、
+            指定し忘れた統合ラインである可能性が高く、そこへ寄せると
+            分岐したブランチの PR を無関係なラインへ着地させて
+            大量の偽のベース衝突を生む。**推定せず除外して警告する。**
+            """
+            if base_counts.get(node, 0) >= LINE_LIKE_THRESHOLD:
+                unlisted_lines[node] = base_counts[node]
+                return None
+
             branch = node.split(":", 1)[1]
-            for candidate_ref in (f"origin/{branch}",):
-                if not repo.exists(candidate_ref):
-                    return None
-                best, best_dist = None, None
-                for name, oid in line_oids.items():
-                    mb = repo.merge_base(oid, candidate_ref)
-                    if mb is None:
-                        continue
-                    # ラインから見て何コミット離れているかで近さを測る
-                    ahead, _ = repo.count_divergence(oid, mb)
-                    if best_dist is None or ahead < best_dist:
-                        best, best_dist = name, ahead
-                return best
-            return None
+            ref = f"origin/{branch}"
+            if not repo.exists(ref):
+                return None
+            best, best_dist = None, None
+            for name, oid in line_oids.items():
+                mb = repo.merge_base(oid, ref)
+                if mb is None:
+                    continue
+                # ラインから見て何コミット離れているかで近さを測る
+                ahead, _ = repo.count_divergence(oid, mb)
+                if best_dist is None or ahead < best_dist:
+                    best, best_dist = name, ahead
+            return best
 
         graph = dag.build(prs, lines, infer_line=infer_line)
 
@@ -111,11 +133,28 @@ def run(
         by_line: dict[str, list[Candidate]] = {name: [] for name in line_names}
         skipped: list[tuple[str, str]] = []
 
+        for node, count in sorted(unlisted_lines.items()):
+            branch = node.split(":", 1)[1]
+            print(
+                f"  注意: ブランチ '{branch}' に {count} 件の PR が直接ぶら下がっています。"
+                f"統合ラインとして扱うなら --lines に追加してください"
+                f"（現状これらの PR は解析から除外されます）。",
+                file=sys.stderr,
+            )
+
         for pr_id in sorted(graph.prs):
             pr = graph.prs[pr_id]
             res = graph.resolutions[pr_id]
             if res.line is None or res.line not in by_line:
-                skipped.append((pr_id, f"統合ラインを解決できない ({res.resolution})"))
+                root_branch = res.root_node.split(":", 1)[1]
+                if res.root_node in unlisted_lines:
+                    reason = (
+                        f"'{root_branch}' は指定された統合ラインに含まれていない"
+                        f"（{unlisted_lines[res.root_node]} 件の PR がぶら下がる別の統合先）"
+                    )
+                else:
+                    reason = f"統合ラインを解決できない ({res.resolution})"
+                skipped.append((pr_id, reason))
                 continue
             if not repo.exists(pr.head_oid):
                 skipped.append((pr_id, "head コミットがローカルに存在しない"))
