@@ -143,6 +143,16 @@ function authorChip(login, avatarUrl, { compact = false } = {}) {
 
 
 
+/** 「Draft を隠す」が効いているか。PR を一覧・集計する箇所すべてで使う。 */
+function isHidden(id) {
+  return !!state.hideDraft && !!(PR.get(id) || {}).is_draft;
+}
+
+/** 表示対象の PR だけに絞る。 */
+function visiblePrs(ids) {
+  return [...ids].filter((id) => !isHidden(id));
+}
+
 function prBadges(pr) {
   const out = [];
   if (pr.review_decision === "APPROVED") out.push(el("span", { class: "badge approved" }, "✓ Approved"));
@@ -255,6 +265,13 @@ function viewBoard() {
                 `これらはベースブランチと衝突していて着地させられないため、`
                 + `${a.unlocks_pairs} ペア（全体の ${pct(a.unlocks_pairs, iv.pairs_evaluated)}%）が判定不能になっている。`),
               el("div", { class: "sub mono" }, a.prs.map(shortId).join(" ")),
+              // ここはリポジトリの状態であって「表示中の PR」ではない。
+              // 絞り込み中に件数が食い違って見えるので、その旨を書く。
+              state.hideDraft && a.prs.some((id) => isHidden(id))
+                ? el("div", { class: "sub" },
+                    `※ この件数は Draft を含みます（表示中は `
+                    + `${visiblePrs(a.prs).length} 件）`)
+                : null,
             ),
           ),
         );
@@ -335,24 +352,31 @@ function viewBoard() {
     : preset.order.map((pr, i) => ({ index: i + 1, pr }));
   const stepByPr = new Map(steps.map((s) => [s.pr, s]));
 
-  const cleanCount = steps.filter((s) => s.result === "clean").length;
-  const rebaseCount = steps.filter((s) => s.result === "skipped").length;
-  const conflictCount = steps.filter((s) => s.result === "conflict").length;
+  const shown = steps.filter((s) => !isHidden(s.pr));
+  const cleanCount = shown.filter((s) => s.result === "clean").length;
+  const rebaseCount = shown.filter((s) => s.result === "skipped").length;
+  const conflictCount = shown.filter((s) => s.result === "conflict").length;
+  const hiddenCount = steps.length - shown.length;
   root.append(el("div", { class: "stat-row" },
-    el("div", {}, el("strong", {}, preset.order.length), "対象PR"),
+    el("div", {}, el("strong", {}, shown.length), "対象PR"),
     el("div", {}, el("strong", {}, cleanCount), "そのままマージできる"),
     el("div", {}, el("strong", {}, conflictCount), "解決が必要"),
     el("div", {}, el("strong", {}, rebaseCount), "先にrebaseが必要"),
     el("div", { title: "他のPRとの意図しない干渉が無い。スタックの親を待つものは含む" },
-      el("strong", {}, independent.size), "干渉なし"),
-    undetermined.size
+      el("strong", {}, visiblePrs(independent).length), "干渉なし"),
+    visiblePrs(undetermined).length
       ? el("div", { title: "ベースと衝突していて着地させられないため、他PRとの干渉を判定できていない" },
-          el("strong", {}, undetermined.size), "干渉は判定不能")
+          el("strong", {}, visiblePrs(undetermined).length), "干渉は判定不能")
+      : null,
+    hiddenCount
+      ? el("div", { class: "muted", title: "「Draft を隠す」で除外されている" },
+          el("strong", {}, hiddenCount), "Draft を非表示")
       : null,
   ));
 
-  const nextUp = preset.order.find((id) => (stepByPr.get(id) || {}).result === "clean");
-  const visible = preset.order.filter((id) => !state.hideDraft || !PR.get(id)?.is_draft);
+  const nextUp = preset.order.find(
+    (id) => !isHidden(id) && (stepByPr.get(id) || {}).result === "clean");
+  const visible = visiblePrs(preset.order);
 
   const seqBody = el("div", { class: "seq" });
   visible.forEach((id) => {
@@ -447,13 +471,15 @@ function viewBoard() {
   if (o.clusters.length) {
     const cl = el("div", { class: "cluster-cards" });
     for (const c of o.clusters) {
-      const authors = authorsOf(c.members);
+      const shownMembers = visiblePrs(c.members);
+      if (!shownMembers.length) continue;
+      const authors = authorsOf(shownMembers);
       cl.append(el("button", {
         class: "cluster-card",
         onclick: () => { state.view = "cluster"; state.cluster = c.id; render(); },
       },
         el("strong", {}, c.id),
-        el("span", { class: "small muted" }, `${c.members.length}件 / 内部衝突 ${c.internal_pairs}ペア`),
+        el("span", { class: "small muted" }, `${shownMembers.length}件 / 内部衝突 ${c.internal_pairs}ペア`),
         el("span", { class: "file-authors" },
           ...authors.slice(0, 5).map(([a, av]) => authorChip(a, av, { compact: true })))));
     }
@@ -519,11 +545,11 @@ function viewCluster() {
 
   const preset = o.presets[state.preset] || o.presets.balanced;
   const rank = new Map(preset.order.map((id, i) => [id, i]));
-  const members = [...c.members].sort((a, b) => (rank.get(a) ?? 1e9) - (rank.get(b) ?? 1e9));
+  const members = visiblePrs(c.members).sort((a, b) => (rank.get(a) ?? 1e9) - (rank.get(b) ?? 1e9));
   const memberSet = new Set(members);
   const pairs = iv.pairs.filter(
     (x) => memberSet.has(x.a) && memberSet.has(x.b) && x.level !== undefined && x.level >= 1,
-  );
+  );  // memberSet は表示対象だけなので、Draft を含むペアはここで落ちる
   const authors = [...new Set(members.map((m) => PR.get(m)?.author).filter(Boolean))];
   const blocked = members.filter((m) => PR.get(m)?.base_conflict);
 
@@ -693,10 +719,14 @@ function buildFileIndex() {
     return files.get(path);
   };
 
-  for (const p of prs) for (const f of p.changed_files) get(f).prs.add(p.id);
+  for (const p of prs) {
+    if (isHidden(p.id)) continue;
+    for (const f of p.changed_files) get(f).prs.add(p.id);
+  }
 
   for (const pair of iv.pairs) {
     if (pair.level === undefined) continue;
+    if (isHidden(pair.a) || isHidden(pair.b)) continue;
     for (const cf of pair.conflict_files || []) {
       get(cf.path).conflicts.push({
         a: pair.a, b: pair.b, level: pair.level, structural: cf.structural, file: cf,
@@ -789,6 +819,7 @@ function viewFiles() {
     const q = (state.fileQuery || "").toLowerCase();
     let rows = [...index.values()]
       .filter((r) => !q || r.path.toLowerCase().includes(q))
+      .filter((r) => r.prs.size > 0)
       .filter((r) => state.filesSharedOnly === false || r.prs.size > 1)
       .filter((r) => !state.filesConflictOnly || r.conflicts.length)
       .filter((r) => !state.author || [...r.prs].some((id) => PR.get(id)?.author === state.author))
@@ -823,7 +854,8 @@ function viewFiles() {
       const body = el("div", { class: "file-body" });
 
       // 主役: この場所を、どの PR がどう変えようとしているか
-      const changes = (DATA.file_changes && DATA.file_changes[state.line] || {})[rec.path];
+      const changes = ((DATA.file_changes && DATA.file_changes[state.line]) || {})[rec.path]
+        ?.filter((r) => !isHidden(r.pr));
       if (changes && changes.length) {
         body.append(el("section", {},
           el("h4", {}, "この場所を変更しようとしている PR"),
@@ -921,6 +953,7 @@ function viewConflicts() {
 
   const rows = iv.pairs
     .filter((p) => p.level !== undefined && p.level >= 1)
+    .filter((p) => !isHidden(p.a) && !isHidden(p.b))
     .filter((p) => !state.author || [p.a, p.b].some((x) => PR.get(x)?.author === state.author))
     .sort((a, b) => b.level - a.level || (b.conflict_files || []).length - (a.conflict_files || []).length);
 
@@ -977,6 +1010,11 @@ function prLink(id) {
 
 function viewStacks() {
   const root = el("div");
+  if (state.hideDraft) {
+    root.append(el("p", { class: "hint" },
+      "⚠ この画面では「Draft を隠す」を適用していません。"
+      + "鎖の途中を省くと、存在しない直接依存があるように見えてしまうためです。"));
+  }
   root.append(el("p", { class: "hint" },
     "スタックした PR は、親がマージされるまでマージできない（ハード制約）。"
     + "横軸がスタック深度、帯がリポジトリ。帯の境界を跨ぐ矢印は、"
@@ -1050,7 +1088,8 @@ function viewMine() {
     return root;
   }
 
-  const mine = DATA.pull_requests.filter((p) => p.author === state.author && p.line === state.line);
+  const mine = DATA.pull_requests.filter(
+    (p) => p.author === state.author && p.line === state.line && !isHidden(p.id));
   const iv = DATA.interference[state.line];
   const o = DATA.orders[state.line];
   const preset = o.presets[state.preset] || o.presets.balanced;
@@ -1088,6 +1127,7 @@ function viewMine() {
   // 衝突相手のうち、自分が先に推奨されているもの／後のもの
   for (const pair of iv.pairs) {
     if (pair.level === undefined || pair.level < 2) continue;
+    if (isHidden(pair.a) || isHidden(pair.b)) continue;
     const [a, b] = [pair.a, pair.b];
     const mineSide = PR.get(a)?.author === state.author ? a : PR.get(b)?.author === state.author ? b : null;
     if (!mineSide) continue;
@@ -1105,7 +1145,7 @@ function viewMine() {
   for (const id of waiting.keys()) ready.delete(id);
 
   const box = (title, map, hint) => {
-    const entries = [...map.entries()].sort(
+    const entries = [...map.entries()].filter(([id]) => !isHidden(id)).sort(
       (x, y) => (rank.get(x[0]) ?? 1e9) - (rank.get(y[0]) ?? 1e9),
     );
     return el("div", { class: "panel" },
@@ -1134,7 +1174,7 @@ function viewTable() {
   const root = el("div");
   const rows = DATA.pull_requests
     .filter((p) => p.line === state.line)
-    .filter((p) => !state.hideDraft || !p.is_draft)
+    .filter((p) => !isHidden(p.id))
     .filter((p) => !state.author || p.author === state.author);
 
   const o = DATA.orders[state.line];
@@ -1219,7 +1259,7 @@ function interferenceGraph(ids, { height = 300 } = {}) {
   const rank = new Map(preset.order.map((id, i) => [id, i]));
 
   // 推奨順に並べる。横位置そのものが「いつ流すか」を表す。
-  const nodes = [...ids].sort((a, b) => (rank.get(a) ?? 1e9) - (rank.get(b) ?? 1e9));
+  const nodes = visiblePrs(ids).sort((a, b) => (rank.get(a) ?? 1e9) - (rank.get(b) ?? 1e9));
   const idx = new Map(nodes.map((id, i) => [id, i]));
 
   const conflicts = iv.pairs.filter(

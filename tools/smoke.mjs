@@ -58,7 +58,9 @@ for (const line of Object.keys(data.interference)) {
     m.state.preset = preset;
     for (const [name, fn] of Object.entries(m.VIEWS)) {
       for (const author of ["", ...[...new Set(data.pull_requests.map(p=>p.author))].slice(0,2)]) {
+      for (const hideDraft of [false, true]) {
         m.state.author = author;
+        m.state.hideDraft = hideDraft;
         // クラスタ詳細は各クラスタを、他は 1 回ずつ
         const clusters = name === "cluster"
           ? [...(data.orders[line].clusters||[]).map(c=>c.id), "存在しないID"]
@@ -76,8 +78,9 @@ for (const line of Object.keys(data.interference)) {
           }
         }
       }
+      }
     }
-    m.state.cluster = null; m.state.pr = null; m.state.minLevel = 2;
+    m.state.cluster = null; m.state.pr = null; m.state.minLevel = 2; m.state.hideDraft = false;
   }
 }
 console.log(`  ${entry.repo}: ${Object.keys(data.interference).length} ライン × ${Object.keys(data.orders[Object.keys(data.orders)[0]].presets).length} プリセット を検証`);
