@@ -92,6 +92,10 @@ jobs:
           fi
 
       - name: 解析を実行
+        id: analyze
+        # 1 つの対象が失敗しても、残りの結果はデプロイする。
+        # ここで止めると、無関係なリポジトリの解析まで古いままになる。
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -153,3 +157,11 @@ jobs:
       - name: Pages へデプロイ
         id: deploy
         uses: actions/deploy-pages@v4
+
+      - name: 解析の失敗を報告
+        # デプロイを済ませたうえで、失敗があったことは赤で残す
+        if: steps.analyze.outcome == 'failure'
+        run: |
+          echo "::error::一部のリポジトリの解析に失敗しました。" \
+               "成功した分はデプロイ済みです。ログを確認してください。"
+          exit 1

@@ -12,13 +12,23 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+import time
 
 from .model import PullRequest, ReviewNote
+
+#: 一時的な失敗を示す文字列。GitHub の GraphQL は、重いページング付き
+#: クエリに対してときどき 502 を返す（大きなリポジトリで実測 3 回に 1 回）。
+#: 恒久的なエラー（権限不足・存在しないリポジトリ）と混同しないよう、
+#: 明示的に列挙したものだけを再試行する。
+_TRANSIENT = ("HTTP 502", "HTTP 503", "HTTP 504", "timeout", "timed out",
+              "connection reset", "EOF occurred", "TLS handshake")
+_RETRIES = 4
 
 _PR_QUERY = """
 query($owner:String!, $name:String!, $endCursor:String) {
   repository(owner:$owner, name:$name) {
-    pullRequests(states:OPEN, first:100, after:$endCursor) {
+    pullRequests(states:OPEN, first:50, after:$endCursor) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number title url isDraft createdAt updatedAt
@@ -49,10 +59,26 @@ class GitHubError(RuntimeError):
 
 
 def _gh(*args: str) -> str:
-    cp = subprocess.run(["gh", *args], capture_output=True, text=True)
-    if cp.returncode != 0:
-        raise GitHubError(f"gh {' '.join(args)} failed:\n{cp.stderr}")
-    return cp.stdout
+    """`gh` を呼ぶ。一時的な失敗は待って再試行する。"""
+    delay = 2.0
+    for attempt in range(1, _RETRIES + 1):
+        cp = subprocess.run(["gh", *args], capture_output=True, text=True)
+        if cp.returncode == 0:
+            return cp.stdout
+        err = cp.stderr or ""
+        transient = any(s in err for s in _TRANSIENT)
+        if not transient or attempt == _RETRIES:
+            # 引数をそのまま出すとクエリ本文で埋まるので、要点だけ残す
+            head = " ".join(args[:3])
+            raise GitHubError(f"gh {head} … failed: {err.strip()[-300:]}")
+        print(
+            f"  一時的な失敗のため再試行します（{attempt}/{_RETRIES - 1}）: "
+            f"{err.strip()[-80:]}",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+        delay *= 2
+    raise GitHubError("unreachable")
 
 
 def repo_info(repo: str) -> dict:
