@@ -1,7 +1,12 @@
-"""層1: パーサの純関数テスト。
+"""層1: パーサと、その結果を等級に落とすところまでの純関数テスト。
 
 実 git が吐いたバイト列を固定してあるので、このテストは git を必要とせず
 どの環境でも走る（ローカルの git 2.34 でも可）。
+
+等級の判定は `analyzer.interference` の本番経路をそのまま通す（下の `levels`）。
+以前はここに `MergeTreeResult.is_structural()` という**もう 1 つの判定器**が
+あったが、粒度が違う（マージ全体 vs ファイル単位）2 つを同期し続ける形だったので
+本番側 1 本に寄せた。
 """
 
 from __future__ import annotations
@@ -24,9 +29,12 @@ def load(name: str, *, clean: bool) -> MergeTreeResult:
 def levels(result: MergeTreeResult) -> dict[str, Level]:
     """パース結果を **本番と同じ経路** で等級に落とす。
 
-    `repo=None` で呼べば git を触らずに済む（衝突箇所の中身は取れないが、
-    等級はステージ集合と型だけで決まる）。分類器を 2 つ持たないために、
-    テストもこの経路を通す。
+    `conflict_files_from` は `repo` を省くと git を触らない（衝突箇所の中身は
+    取れないが、等級はステージ集合と型だけで決まるので影響しない）。
+    分類器を 2 つ持たないために、テストもこの経路を通す。
+
+    **裏を返すと `comment_only` と `hunks` はこの経路では常に空**なので、
+    それらの検証は実 git を使う `test_interference.py` の担当。
     """
     return {cf.path: classify_file(cf) for cf in conflict_files_from(result)}
 
@@ -44,7 +52,6 @@ class TestCleanMerges:
         assert r.stages == {}
         assert r.messages == ()
         assert r.conflict_paths == frozenset()
-        assert levels(r) == {}
 
     def test_clean_landing_tree_pair(self):
         """着地tree同士のクリーンなマージ（同一ファイル・別領域 = L1）。"""
@@ -61,7 +68,7 @@ class TestContentConflicts:
         assert not r.clean
         assert r.conflict_paths == {"shared.py"}
         assert r.stages["shared.py"] == {1, 2, 3}
-        # 内容衝突のみなので構造衝突ではない
+        # ステージが 3 つ揃う = 内容衝突 = L2（構造衝突なら L3 になる）
         assert levels(r) == {"shared.py": Level.L2}
 
     def test_auto_merging_records_are_not_conflicts(self):

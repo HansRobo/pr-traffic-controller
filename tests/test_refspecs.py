@@ -14,18 +14,17 @@ from __future__ import annotations
 from analyzer.analyze import _refspecs
 from analyzer.model import PullRequest
 
+from .factories import make_pr
+
 
 def pr(number: int, *, base_repo: str, head_repo: str, base_branch: str = "main") -> PullRequest:
-    return PullRequest(
+    """refspec の検証に要るのは repo と番号だけ。他は固定でよい。"""
+    return make_pr(
+        number,
         repo=base_repo,
-        number=number,
-        title=f"PR {number}",
-        url="",
-        author="someone",
         head_repo=head_repo,
         head_branch="feature",
         head_oid="0" * 40,
-        base_repo=base_repo,
         base_branch=base_branch,
     )
 

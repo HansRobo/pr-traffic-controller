@@ -12,6 +12,8 @@ import pytest
 from analyzer import dag
 from analyzer.model import PullRequest
 
+from .factories import make_pr
+
 UP = "upstream/project"   # 上流リポジトリ
 FK = "contributor/project"  # 貢献者のフォーク
 
@@ -22,15 +24,12 @@ LINES = {
 
 
 def pr(repo, number, head_repo, head_branch, base_repo, base_branch, **kw) -> PullRequest:
-    return PullRequest(
+    """このファイル向けの位置引数版。フィールドの穴埋めは factories が持つ。"""
+    return make_pr(
+        number,
         repo=repo,
-        number=number,
-        title=f"{repo}#{number}",
-        url=f"https://github.com/{repo}/pull/{number}",
-        author=kw.pop("author", "someone"),
         head_repo=head_repo,
         head_branch=head_branch,
-        head_oid=kw.pop("head_oid", f"{number:040d}"),
         base_repo=base_repo,
         base_branch=base_branch,
         **kw,
@@ -123,24 +122,20 @@ class TestDuplicateHead:
     フォーク側 #2 (base=feat/b) の両方の head になっている。
     """
 
-    def duplicate_set(self) -> list[PullRequest]:
-        return chain_a() + [
-            pr(UP, 12, FK, "feat/c", UP, "feat/a")
-        ]
+    @pytest.fixture
+    def g(self):
+        return dag.build(chain_a() + [pr(UP, 12, FK, "feat/c", UP, "feat/a")], LINES)
 
-    def test_warning_is_emitted(self):
-        g = dag.build(self.duplicate_set(), LINES)
+    def test_warning_is_emitted(self, g):
         w = [x for x in g.warnings if x.kind == "duplicate_pr_head"]
         assert len(w) == 1
         assert set(w[0].subjects) == {f"{UP}#12", f"{FK}#2"}
 
-    def test_neither_pr_is_dropped(self):
-        g = dag.build(self.duplicate_set(), LINES)
+    def test_neither_pr_is_dropped(self, g):
         assert f"{UP}#12" in g.resolutions
         assert f"{FK}#2" in g.resolutions
 
-    def test_both_resolve_to_same_line(self):
-        g = dag.build(self.duplicate_set(), LINES)
+    def test_both_resolve_to_same_line(self, g):
         assert g.line_of(f"{UP}#12") == "main"
         assert g.line_of(f"{FK}#2") == "main"
 
@@ -154,12 +149,14 @@ class TestOrphanBase:
     def orphan_set(self) -> list[PullRequest]:
         return [pr(UP, 40, UP, "feat/k", UP, "feat/orphan-parent")]
 
-    def test_does_not_raise(self):
-        g = dag.build(self.orphan_set(), LINES)
+    @pytest.fixture
+    def g(self):
+        return dag.build(self.orphan_set(), LINES)
+
+    def test_does_not_raise(self, g):
         assert f"{UP}#40" in g.resolutions
 
-    def test_warns_and_marks_ambiguous_without_inference(self):
-        g = dag.build(self.orphan_set(), LINES)
+    def test_warns_and_marks_ambiguous_without_inference(self, g):
         assert [w for w in g.warnings if w.kind == "orphan_base_branch"]
         assert g.resolutions[f"{UP}#40"].resolution == "ambiguous"
         assert g.line_of(f"{UP}#40") is None
@@ -182,6 +179,11 @@ class TestPathological:
         assert all(r.resolution == "cyclic" for r in g.resolutions.values())
 
     def test_two_lines_are_kept_separate(self):
+        """別ラインの PR は所属も root も混ざらない。
+
+        root が分かれていることまでここで見る（別ラインどうしは
+        `INCOMPARABLE` になるべきで、その根拠が root の相違）。
+        """
         prs = [
             pr(UP, 1, UP, "x", UP, "main"),
             pr(UP, 2, UP, "y", UP, "develop"),
@@ -189,23 +191,12 @@ class TestPathological:
         g = dag.build(prs, LINES)
         assert g.line_of(f"{UP}#1") == "main"
         assert g.line_of(f"{UP}#2") == "develop"
+        assert g.resolutions[f"{UP}#1"].root_node != g.resolutions[f"{UP}#2"].root_node
 
     def test_empty_input(self):
         g = dag.build([], LINES)
         assert g.resolutions == {}
         assert g.warnings == []
-
-
-class TestIncomparableAcrossLines:
-    def test_prs_on_different_lines_never_share_a_root(self):
-        g = dag.build(
-            [
-                pr(UP, 1, UP, "x", UP, "main"),
-                pr(UP, 2, UP, "y", UP, "develop"),
-            ],
-            LINES,
-        )
-        assert g.resolutions[f"{UP}#1"].root_node != g.resolutions[f"{UP}#2"].root_node
 
 
 class TestForkLineAliases:
