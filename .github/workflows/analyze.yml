@@ -50,7 +50,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: git のバージョンを確認
         # merge-tree --write-tree -z が要る。古い git だと衝突を
@@ -66,14 +66,14 @@ jobs:
           print(f"OK: git {v}")
           PY
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       # 蓄積済みの解析結果を復元する。キーは実行ごとに変え、restore-keys で
       # 直近のものを拾う（同じキーには保存し直せないため）。
       - name: 解析結果を復元
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: docs/data
           key: analysis-${{ github.run_id }}
@@ -135,7 +135,7 @@ jobs:
           PY
 
       - name: 解析結果を保存
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: docs/data
           key: analysis-${{ github.run_id }}
@@ -150,13 +150,13 @@ jobs:
           grep -o 'styles.css?v=[0-9]*' docs/index.html | head -1
           grep -o 'app.js?v=[0-9]*' docs/index.html | head -1
 
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: docs
       - name: Pages へデプロイ
         id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
 
       - name: 解析の失敗を報告
         # デプロイを済ませたうえで、失敗があったことは赤で残す

@@ -19,7 +19,7 @@ jobs:
     name: ${{ matrix.name }}
     container: ${{ matrix.container }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: 依存を用意
         run: |
           if command -v apk >/dev/null; then
@@ -43,8 +43,8 @@ jobs:
     runs-on: ubuntu-latest
     name: ビューアのスモークテスト
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - run: node --check docs/app.js
