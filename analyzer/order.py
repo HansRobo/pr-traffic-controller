@@ -23,12 +23,14 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import itertools
+import math
 from array import array
 from dataclasses import dataclass, field
 
 from .dag import StackGraph
-from .model import Candidate, Level, PairResult, Relation
+from .model import Candidate, Level, PairResult, pair_key
 
 #: 干渉レベルごとの解決コスト係数。
 SEVERITY = {
@@ -65,7 +67,6 @@ CLUSTER_EDGE_LEVEL = Level.L2
 class Weights:
     """プリセットごとの重み。"""
 
-    name: str
     gamma_approved: float = 1.0
     """後回しにされた Approve 済み PR への追加コスト。"""
 
@@ -81,10 +82,12 @@ class Weights:
     w_draft: float = 3.0
 
 
+#: キーがプリセット名。`Weights` 自身は名前を持たない（辞書のキーと
+#: 二重に持つと、片方だけ変えたときにどちらが正か分からなくなる）。
 PRESETS = {
-    "balanced": Weights(name="balanced"),
-    "approve-first": Weights(name="approve-first", w_approved=20.0, mu_wait=2.0),
-    "least-conflict": Weights(name="least-conflict", mu_wait=0.0),
+    "balanced": Weights(),
+    "approve-first": Weights(w_approved=20.0, mu_wait=2.0),
+    "least-conflict": Weights(mu_wait=0.0),
 }
 
 
@@ -109,10 +112,6 @@ class Cluster:
     members: list[str]
     internal_pairs: int = 0
 
-    @property
-    def size(self) -> int:
-        return len(self.members)
-
 
 @dataclass
 class Metrics:
@@ -124,7 +123,6 @@ class Metrics:
 
 @dataclass
 class LinePlan:
-    line: str
     clusters: list[Cluster] = field(default_factory=list)
     independent: list[str] = field(default_factory=list)
     undetermined: list[str] = field(default_factory=list)
@@ -151,7 +149,9 @@ def pair_units(pair: PairResult) -> float:
     """
     if pair.level is None or pair.level < Level.L1:
         return 0.0
-    return float(max(len(pair.conflict_files), 1 if pair.level >= Level.L1 else 0))
+    # ここまで来た時点で L1 以上が確定している。衝突ファイルが 0 件でも
+    # （L1 は衝突しないので普通に起きる）「量」は最低 1 とする。
+    return float(max(len(pair.conflict_files), 1))
 
 
 def urgency(ctx: PRContext, w: Weights) -> float:
@@ -189,13 +189,14 @@ def cost(p: PRContext, q: PRContext, pair: PairResult | None, w: Weights) -> flo
 def build_clusters(
     ids: list[str],
     pairs: list[PairResult],
-    graph: StackGraph | None = None,
     *,
     edge_level: Level = CLUSTER_EDGE_LEVEL,
 ) -> tuple[list[Cluster], list[str]]:
     """**意図しない干渉**の連結成分に分解する。
 
-    辺は衝突ペアだけで張る。**スタックの親子辺は使わない。**
+    辺は衝突ペアだけで張る。**スタックの親子辺は使わない**ので、
+    `StackGraph` はここでは受け取らない（受け取ると「スタックも考慮して
+    いる」と誤読される）。
     スタックは作者が意図して積んだ依存であり、順序はすでに決まっている。
     これを連結成分に混ぜると、衝突が 1 件も無いスタック鎖が
     「順序を議論すべきクラスタ」として現れてしまう —— 議論すべきことは
@@ -294,7 +295,7 @@ def order_cluster(
     # W[i][j] = i を先、j を後にしたときのコスト
     W = [[0.0] * n for _ in range(n)]
     for i, j in itertools.permutations(range(n), 2):
-        key = (members[i], members[j]) if members[i] <= members[j] else (members[j], members[i])
+        key = pair_key(members[i], members[j])
         W[i][j] = cost(ctx[members[i]], ctx[members[j]], pair_map.get(key), w)
 
     # add_cost[S*n + j] = 集合 S をすべて先に置いたとき、j を次に置くコスト。
@@ -370,7 +371,7 @@ def _greedy_with_local_search(
         best = min(
             ready,
             key=lambda m: sum(
-                cost(ctx[m], ctx[o], pair_map.get((m, o) if m <= o else (o, m)), w)
+                cost(ctx[m], ctx[o], pair_map.get(pair_key(m, o)), w)
                 for o in remaining
                 if o != m
             ),
@@ -440,8 +441,7 @@ def total_cost(
     total = 0.0
     for i, p in enumerate(seq):
         for q in seq[i + 1 :]:
-            key = (p, q) if p <= q else (q, p)
-            total += cost(ctx[p], ctx[q], pair_map.get(key), w)
+            total += cost(ctx[p], ctx[q], pair_map.get(pair_key(p, q)), w)
     return total
 
 
@@ -449,7 +449,7 @@ def total_cost(
 #: 各プリセットは重みが違うので `total_cost` の値同士は比較できない。
 #: 「どのプリセットを選ぶと衝突解決の負担が増えるか」を同じ尺度で
 #: 見るために、**常に balanced の重み**で衝突項だけを測る。
-_REFERENCE = Weights(name="_reference", mu_wait=0.0)
+_REFERENCE = Weights(mu_wait=0.0)
 
 
 def conflict_cost(
@@ -476,8 +476,7 @@ def compute_metrics(
         for q in ids:
             if p == q:
                 continue
-            key = (p, q) if p <= q else (q, p)
-            pair = pair_map.get(key)
+            pair = pair_map.get(pair_key(p, q))
             if pair is None or pair.level is None or pair.level < Level.L1:
                 continue
             m.blast_radius += 1
@@ -493,14 +492,11 @@ def compute_metrics(
 
 
 def plan_line(
-    line: str,
     candidates: list[Candidate],
     pairs: list[PairResult],
     graph: StackGraph,
 ) -> LinePlan:
     """1 つの統合ラインについて、クラスタ分解と各プリセットの順序を作る。"""
-    import datetime as _dt
-
     ids = sorted(c.id for c in candidates)
     by_id = {c.id: c for c in candidates}
     now = _dt.datetime.now(_dt.timezone.utc)
@@ -516,8 +512,6 @@ def plan_line(
                 ).days
             except ValueError:
                 stale = 0.0
-        import math
-
         churn = (pr.additions + pr.deletions) if pr else 0
         ctx[i] = PRContext(
             id=i,
@@ -530,7 +524,7 @@ def plan_line(
         )
 
     pair_map: dict[tuple[str, str], PairResult] = {p.key(): p for p in pairs}
-    clusters, unclustered = build_clusters(ids, pairs, graph)
+    clusters, unclustered = build_clusters(ids, pairs)
     preds = _predecessors(ids, graph)
 
     # クラスタに属さないものを「独立」と「判定不能」に分ける。
@@ -539,7 +533,6 @@ def plan_line(
     independent = [i for i in unclustered if not by_id[i].has_base_conflict]
 
     plan = LinePlan(
-        line=line,
         clusters=clusters,
         independent=independent,
         undetermined=undetermined,

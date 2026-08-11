@@ -21,6 +21,9 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from . import parallel
+from .gitops import function_name_of
+
 if TYPE_CHECKING:
     from .gitops import Repo
     from .model import Candidate
@@ -30,8 +33,9 @@ MAX_HUNKS = 4
 #: 1 hunk で保持する行数の上限。
 MAX_LINES = 16
 
+#: hunk ヘッダから **target 側（`+`）** の行番号を取る。`gitops` 側は
+#: base 側（`-`）を取るので、正規表現は共有できない（座標系が違う）。
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@ ?(.*)$")
-_DEF_RE = re.compile(r"^\s*(?:async\s+)?(?:def|class)\s+(\w+)")
 
 
 @dataclass(frozen=True)
@@ -45,8 +49,7 @@ class ChangeHunk:
 
     @property
     def function(self) -> str | None:
-        m = _DEF_RE.match(self.context)
-        return m.group(1) if m else None
+        return function_name_of(self.context)
 
 
 def parse_diff(text: str) -> tuple[ChangeHunk, ...]:
@@ -112,18 +115,27 @@ def build(
     if not hot:
         return {}
 
-    # まず全部集めてから、比較の意味がある hunk だけを残す
+    # まず全部集めてから、比較の意味がある hunk だけを残す。
+    # diff は (パス × 候補) の数だけ要る。互いに独立なので並列に流すが、
+    # `imap` は **投入順** で返すので `raw` の並びは列挙順のまま固定される。
+    jobs = [
+        (path, c)
+        for path in sorted(hot)
+        for c in usable
+        if path in c.changed_files
+    ]
+
+    def diff_hunks(job: tuple[str, "Candidate"]) -> tuple[ChangeHunk, ...]:
+        path, c = job
+        text = repo.run(
+            "diff", "-U1", "--no-color", line_oid, c.landing_tree, "--", path, check=False
+        )
+        return parse_diff(text)
+
     raw: dict[str, list[tuple[str, tuple[ChangeHunk, ...]]]] = {}
-    for path in sorted(hot):
-        for c in usable:
-            if path not in c.changed_files:
-                continue
-            text = repo.run(
-                "diff", "-U1", "--no-color", line_oid, c.landing_tree, "--", path, check=False
-            )
-            hunks = parse_diff(text)
-            if hunks:
-                raw.setdefault(path, []).append((c.id, hunks))
+    for (path, c), hunks in zip(jobs, parallel.imap(diff_hunks, jobs)):
+        if hunks:
+            raw.setdefault(path, []).append((c.id, hunks))
 
     out: dict[str, list[dict]] = {}
     for path, entries in raw.items():

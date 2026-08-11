@@ -14,11 +14,13 @@ O(n) 回の merge-tree が要るので、候補を増やすと桁が変わる。
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from . import parallel
 from .interference import conflict_files_from
+from .report import conflict_file_dict
 from .mergetree import MergeTreeError
 from .model import Candidate, ConflictFile
 
@@ -42,18 +44,12 @@ class Simulation:
     merged: int = 0
     conflicted: int = 0
 
-    @property
-    def first_conflict(self) -> Step | None:
-        return next((s for s in self.steps if s.result == "conflict"), None)
-
 
 def simulate(
     repo: "Repo",
     line_oid: str,
     order: list[str],
     candidates: dict[str, Candidate],
-    *,
-    stop_after_conflicts: int | None = None,
 ) -> Simulation:
     """順序どおりに 1 件ずつ統合ラインへ積み上げる。
 
@@ -104,8 +100,6 @@ def simulate(
                     conflict_files=conflict_files_from(result),
                 )
             )
-            if stop_after_conflicts is not None and sim.conflicted >= stop_after_conflicts:
-                break
 
     return sim
 
@@ -128,17 +122,14 @@ def compare_with_matrix(sim: Simulation, predicted_conflicts: set[str]) -> dict:
 
 def _topological(items, preds: dict[str, set[str]]) -> list[str]:
     """先行制約を保った決定的な順序。循環があっても止まらない。"""
-    pool = list(items)
-    remaining = set(pool)
+    remaining = set(items)
     out: list[str] = []
-    placed: set[str] = set()
     while remaining:
         ready = sorted(p for p in remaining if not (preds.get(p, set()) & remaining))
         if not ready:  # 循環。決定的に打ち切る
             ready = [sorted(remaining)[0]]
         for p in ready:
             out.append(p)
-            placed.add(p)
             remaining.discard(p)
     return out
 
@@ -228,8 +219,6 @@ def best_landing_order(
     互いに完全に独立なので並列に流すが、**畳み込みは投入順で行う** ——
     完了順に畳むと同点のときに選ばれる順序が実行ごとに変わる。
     """
-    import random
-
     # 乱数は先に使い切る。並列実行でも消費順が変わらないようにするため。
     rng = random.Random(seed)
     scan = [p for p in pool if p in candidates]
@@ -283,8 +272,6 @@ def probe_order_sensitivity(
         呼び出し側は同じ順序をプリセットの検証で流しているので、
         既算のものを渡せば 1 本まるごと省ける。
     """
-    import random
-
     # 乱数は先に使い切る（並列実行でも消費順を固定する）。
     rng = random.Random(seed)
     pool = [p for p in base_order if p in candidates]
@@ -330,12 +317,7 @@ def to_dict(sim: Simulation) -> dict:
                 "result": s.result,
                 **({"detail": s.detail} if s.detail else {}),
                 **(
-                    {
-                        "conflict_files": [
-                            {"path": c.path, "stages": sorted(c.stages), "types": list(c.types)}
-                            for c in s.conflict_files
-                        ]
-                    }
+                    {"conflict_files": [conflict_file_dict(c) for c in s.conflict_files]}
                     if s.conflict_files
                     else {}
                 ),

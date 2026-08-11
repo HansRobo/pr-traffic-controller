@@ -91,7 +91,9 @@ def classify_file(cf: ConflictFile) -> Level:
     ステージを一切生成しない衝突（directory/file 等）は型で拾う。
     """
     if cf.stages:
-        return Level.L2 if cf.stages == frozenset({1, 2, 3}) else Level.L3
+        # ステージ集合の読み方は `ConflictFile.is_structural` が持っている。
+        # ここに書き写すと、git の出力形式の理解を 2 箇所で同期することになる。
+        return Level.L3 if cf.is_structural else Level.L2
     return Level.L2 if cf.types == ("CONFLICT (contents)",) else Level.L3
 
 
@@ -113,27 +115,48 @@ def build_file_levels(
     out: list[FileInterference] = []
     for path in sorted(overlap | set(by_path)):
         cf = by_path.get(path)
-        if cf is None:
-            out.append(
-                FileInterference(
-                    path=path,
-                    level=Level.L1,
-                    warnings=tuple(warn_by_path.get(path, ())),
-                )
+        # 衝突していないファイルは衝突由来のフィールドを持たない。
+        # 省いた分は `FileInterference` の既定値とちょうど一致するので、
+        # 分岐ごとにコンストラクタを書き分けない（フィールドを足したとき
+        # 片方だけ直しても型エラーにならない形を避ける）。
+        conflict_fields = (
+            {}
+            if cf is None
+            else dict(
+                stages=cf.stages,
+                types=cf.types,
+                hunks=cf.hunks,
+                comment_only=cf.comment_only,
             )
-        else:
-            out.append(
-                FileInterference(
-                    path=path,
-                    level=classify_file(cf),
-                    stages=cf.stages,
-                    types=cf.types,
-                    hunks=cf.hunks,
-                    comment_only=cf.comment_only,
-                    warnings=tuple(warn_by_path.get(path, ())),
-                )
+        )
+        out.append(
+            FileInterference(
+                path=path,
+                level=Level.L1 if cf is None else classify_file(cf),
+                warnings=tuple(warn_by_path.get(path, ())),
+                **conflict_fields,
             )
+        )
     return tuple(out)
+
+
+def blocking_relation(a: Candidate, b: Candidate) -> Relation | None:
+    """レベルを計算できない関係なら、その `Relation` を返す。計算できるなら None。
+
+    **判定はここ 1 か所に置く。** `analyze_pair` と `_prewarm_hunks` の両方が
+    「このペアは merge-tree まで進むか」を知る必要があり、条件を写すと
+    片方だけ変わったときに黙って乖離する（温めが効かなくなるだけなので
+    気づけない）。
+    """
+    if a.id in b.ancestors or b.id in a.ancestors:
+        # 累積ビューでは内容が包含されるので、干渉を計算しない
+        return Relation.STACKED
+    if a.line != b.line:
+        return Relation.INCOMPARABLE
+    if a.has_base_conflict or b.has_base_conflict:
+        # 着地tree が作れないので同時マージ可能性を問えない
+        return Relation.DEGRADED
+    return None
 
 
 def analyze_pair(
@@ -146,16 +169,13 @@ def analyze_pair(
     detect_semantic: bool = True,
 ) -> PairResult:
     """1 ペアの干渉を判定する。"""
-    if a.id in b.ancestors or b.id in a.ancestors:
-        return PairResult(a=a.id, b=b.id, relation=Relation.STACKED)
-
-    if a.line != b.line:
-        return PairResult(a=a.id, b=b.id, relation=Relation.INCOMPARABLE)
+    blocked = blocking_relation(a, b)
+    if blocked in (Relation.STACKED, Relation.INCOMPARABLE):
+        return PairResult(a=a.id, b=b.id, relation=blocked)
 
     overlap = a.changed_files & b.changed_files
 
-    if a.has_base_conflict or b.has_base_conflict:
-        # 着地tree が作れないので同時マージ可能性を問えない。
+    if blocked is Relation.DEGRADED:
         # merge-base(A,B) へフォールバックしてはいけない —— 1 つの行列に
         # 2 つの異なる定義が混ざり、L2/L3 の意味が壊れる。
         return PairResult(
@@ -252,16 +272,12 @@ def _prewarm_hunks(
     候補の変更ファイル全部ではなく **重なったファイルだけ** に絞る。
     100 ファイル触る PR でも重なるのは数件で、全部温めると逆に高くつく。
 
-    絞り込みの条件は `analyze_pair` と `semantic.detect` が実際に問う条件の
-    写しである（対象拡張子は `semantic.detect` 側が正）。食い違っても
-    答えは変わらず「並列時に温めが効かない」だけなので、気づけない。
-    `FUNCTION_AWARE_SUFFIXES` を広げるときはここも一緒に直すこと。
+    どのペアが merge-tree まで進むかは `blocking_relation` が唯一の情報源。
+    対象拡張子だけは `semantic.detect` 側が正なので、そちらを直接参照する。
     """
     needed: set[tuple[str, str]] = set()
     for a, b in pairs:
-        if a.id in b.ancestors or b.id in a.ancestors or a.line != b.line:
-            continue
-        if a.has_base_conflict or b.has_base_conflict:
+        if blocking_relation(a, b) is not None:
             continue
         for path in a.changed_files & b.changed_files:
             if path.endswith(semantic.FUNCTION_AWARE_SUFFIXES):

@@ -23,6 +23,21 @@ from .mergetree import EXIT_CLEAN, EXIT_CONFLICT, MergeTreeError, MergeTreeResul
 
 MIN_GIT_VERSION = (2, 40)
 
+#: 関数・クラス定義に見える文脈だけを「同一関数」の判定に使う。
+#: トップレベルの変更では context に import 行や辞書キーが入るため、
+#: それらを同一視すると偽陽性になる。
+_DEF = re.compile(r"^\s*(?:async\s+)?(?:def|class)\s+(\w+)")
+
+
+def function_name_of(context: str) -> str | None:
+    """git の hunk ヘッダが付ける「囲っている文脈」から関数・クラス名を取る。
+
+    hunk を表す型が `gitops.Hunk` と `filechanges.ChangeHunk` の 2 つあり、
+    どちらも同じ判定をする。規則を 2 か所に置くと片方だけ直る。
+    """
+    m = _DEF.match(context)
+    return m.group(1) if m else None
+
 
 class GitVersionError(RuntimeError):
     pass
@@ -36,15 +51,9 @@ class Hunk:
     end: int
     context: str
 
-    #: 関数・クラス定義に見える文脈だけを「同一関数」の判定に使う。
-    #: トップレベルの変更では context に import 行や辞書キーが入るため、
-    #: それらを同一視すると偽陽性になる。
-    _DEF = re.compile(r"^\s*(async\s+)?(def|class)\s+(\w+)")
-
     @property
     def function_name(self) -> str | None:
-        m = self._DEF.match(self.context)
-        return m.group(3) if m else None
+        return function_name_of(self.context)
 
 
 def _git_binary() -> str:
@@ -89,6 +98,14 @@ class Repo:
     #: 問い合わせるため、これが無いと O(n²) 回の `git diff -U0` が走る。
     #: ロックは要らない —— dict 操作は atomic で、重複計算しても結果は同じ。
     _hunks: dict = field(default_factory=dict, repr=False, compare=False)
+
+    #: `merge_tree` の結果。キーは 3 つの git オブジェクトなので永続に有効。
+    #: 検証フェーズが同じマージを何度も問う —— `best_landing_order` は貪欲探索の
+    #: 各リスタートで作った順序をそのまま `simulate` に流し直すので、
+    #: 着地した接頭辞の累積 tree 列が丸ごと再現される。リスタート数だけ
+    #: 重複するうえ、全シミュレーションの 1 歩目は `ours=line` で共通になる。
+    #: `_hunks` と同じ理由でロックは要らない（不変 OID の純関数）。
+    _merges: dict = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.path = Path(self.path)
@@ -145,7 +162,23 @@ class Repo:
         実データで検証済み）。`merge_base` は **必ず明示する**。省略すると
         git がマージベースを推論し、合成コミットに対して静かに誤った
         結果を返す。
+
+        結果は `_merges` にメモ化する。**呼び出し側は OID を渡すこと** ——
+        ブランチ名のような可変の ref をキーにすると、ref が動いたときに
+        古い結果を返す。解析中は ref を動かさないので実害は無いが、
+        キーが不変であることがメモ化の前提である。
         """
+        key = (merge_base, ours, theirs)
+        cached = self._merges.get(key)
+        if cached is not None:
+            return cached
+        result = self._merge_tree_uncached(merge_base=merge_base, ours=ours, theirs=theirs)
+        self._merges[key] = result
+        return result
+
+    def _merge_tree_uncached(
+        self, *, merge_base: str, ours: str, theirs: str
+    ) -> MergeTreeResult:
         cp = self._run_raw(
             "merge-tree",
             "--write-tree",

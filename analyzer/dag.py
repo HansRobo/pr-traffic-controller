@@ -36,6 +36,15 @@ def node_key(repo: str, branch: str) -> NodeKey:
     return f"{repo}:{branch}"
 
 
+def split_node(node: NodeKey) -> tuple[str, str]:
+    """`node_key` の逆。書式の知識をこのモジュールの外に漏らさないため。
+
+    ブランチ名には `:` が入りうるので、分割は最初の 1 つだけ。
+    """
+    repo, _, branch = node.partition(":")
+    return repo, branch
+
+
 @dataclass(frozen=True)
 class GraphWarning:
     kind: str
@@ -68,6 +77,7 @@ class Resolution:
 class StackGraph:
     prs: dict[str, PullRequest]
     head_index: dict[NodeKey, list[str]] = field(default_factory=dict)
+    base_index: dict[NodeKey, list[str]] = field(default_factory=dict)
     resolutions: dict[str, Resolution] = field(default_factory=dict)
     warnings: list[GraphWarning] = field(default_factory=list)
 
@@ -80,12 +90,13 @@ class StackGraph:
         return node_key(p.head_repo, p.head_branch)
 
     def children_of(self, pr_id: str) -> list[str]:
-        """この PR の head を base としている PR（＝直接の子）。"""
-        head = self.head_node(pr_id)
+        """この PR の head を base としている PR（＝直接の子）。
+
+        `base_index` を引く。全 PR を走査すると `descendants_of` が
+        ノードごとにそれを繰り返し、O(n²) になる。
+        """
         return sorted(
-            other
-            for other, p in self.prs.items()
-            if other != pr_id and node_key(p.base_repo, p.base_branch) == head
+            other for other in self.base_index.get(self.head_node(pr_id), ()) if other != pr_id
         )
 
     def descendants_of(self, pr_id: str) -> set[str]:
@@ -122,6 +133,7 @@ def build(
 
     for pr_id in graph.prs:
         graph.head_index.setdefault(graph.head_node(pr_id), []).append(pr_id)
+        graph.base_index.setdefault(graph.base_node(pr_id), []).append(pr_id)
 
     for node, owners in sorted(graph.head_index.items()):
         if len(owners) <= 1:

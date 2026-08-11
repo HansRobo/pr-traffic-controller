@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, IntEnum
+from functools import cached_property
 
 
 class Level(IntEnum):
@@ -39,6 +40,16 @@ class Relation(str, Enum):
 
     INCOMPARABLE = "incomparable"
     """異なる統合ラインに属する。比較する意味が無い。"""
+
+
+def pair_key(a: str, b: str) -> tuple[str, str]:
+    """ペアを id 2 つから引くための正規化キー。
+
+    向きの規約はここが唯一の持ち主。`PairResult.key()` もこれに委譲する。
+    規約が散らばると、`pair_map` の作り方だけ変えたときに引き側が全部
+    黙って miss し、衝突ペアがコスト 0 として扱われる。
+    """
+    return (a, b) if a <= b else (b, a)
 
 
 class WarningKind(str, Enum):
@@ -204,9 +215,15 @@ class PairResult:
     overlap_files: frozenset[str] = frozenset()
     warnings: tuple[InterferenceWarning, ...] = ()
 
-    @property
+    @cached_property
     def conflict_files(self) -> tuple[FileInterference, ...]:
-        """実際に衝突している（git がマージできない）ファイルだけ。"""
+        """実際に衝突している（git がマージできない）ファイルだけ。
+
+        キャッシュする。順序付けの局所探索は目的関数を O(n²) 回評価し、
+        その 1 回ごとに全ペアの `cost` を計算するので、素のプロパティだと
+        `files` の走査が何万回も繰り返される。`PairResult` は構築後に
+        `files` を書き換えないので、キャッシュしてよい。
+        """
         return tuple(f for f in self.files if f.level >= Level.L2)
 
     @property
@@ -220,13 +237,27 @@ class PairResult:
         return bool(conflicts) and all(c.comment_only for c in conflicts)
 
     def key(self) -> tuple[str, str]:
-        return (self.a, self.b) if self.a <= self.b else (self.b, self.a)
+        return pair_key(self.a, self.b)
 
 
-@dataclass
-class LineAnalysis:
-    """1 つの統合ラインについての解析結果。"""
+@dataclass(frozen=True)
+class Skip:
+    """解析から外した PR と、その理由。
 
-    line: str
-    candidates: list[Candidate] = field(default_factory=list)
-    pairs: list[PairResult] = field(default_factory=list)
+    `reason` は人向けの文面で、そのまま JSON の `detail` に出る。
+    **振り分けは `kind` で行うこと。** 以前は report 側が `reason` の文面を
+    文字列一致で振り分け、クオートからブランチ名を取り出していたため、
+    文面を 1 語変えるだけで「指定し忘れた統合ライン」の警告が黙って
+    消える状態だった。構造化された情報は構造のまま運ぶ。
+    """
+
+    pr_id: str
+    reason: str
+    kind: str = "unresolved"
+    """unresolved | unlisted_line"""
+
+    branch: str = ""
+    """`kind == "unlisted_line"` のときの、ぶら下がり先ブランチ。"""
+
+    pr_count: int = 0
+    """そのブランチに直接ぶら下がっている PR の数。"""

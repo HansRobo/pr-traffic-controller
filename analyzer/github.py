@@ -79,6 +79,24 @@ class GitHubError(RuntimeError):
     pass
 
 
+#: 退会・削除された作者の表示名。GraphQL は `author` に null を返す。
+UNKNOWN_AUTHOR = "(unknown)"
+
+
+def _login(node: dict) -> str:
+    """`author.login`。null 安全。
+
+    既定値を 1 つに固める。以前は `"(unknown)"` と `"?"` の 2 通りがあり、
+    どちらが正なのか読み手に判断できなかった。
+    """
+    return (node.get("author") or {}).get("login") or UNKNOWN_AUTHOR
+
+
+def _nodes(parent: dict, key: str) -> list[dict]:
+    """`parent[key].nodes`。connection が丸ごと null でも空リストを返す。"""
+    return (parent.get(key) or {}).get("nodes") or []
+
+
 def _gh(*args: str) -> str:
     """`gh` を呼ぶ。一時的な失敗は待って再試行する。
 
@@ -166,7 +184,7 @@ def fetch_pull_requests(repo: str) -> list[PullRequest]:
                 number=n["number"],
                 title=n["title"],
                 url=n["url"],
-                author=(n.get("author") or {}).get("login", "(unknown)"),
+                author=_login(n),
                 author_avatar_url=(n.get("author") or {}).get("avatarUrl", ""),
                 head_repo=head_repo,
                 head_branch=n["headRefName"],
@@ -176,7 +194,7 @@ def fetch_pull_requests(repo: str) -> list[PullRequest]:
                 is_draft=n["isDraft"],
                 review_decision=_effective_review_decision(
                     n.get("reviewDecision"),
-                    ((n.get("reviews") or {}).get("nodes") or []),
+                    _nodes(n, "reviews"),
                 ),
                 github_mergeable=n.get("mergeable") or "UNKNOWN",
                 additions=n.get("additions") or 0,
@@ -218,8 +236,7 @@ def _effective_review_decision(declared: str | None, reviews: list[dict]) -> str
         state = r.get("state") or ""
         if state in _NEUTRAL_REVIEWS:
             continue
-        author = (r.get("author") or {}).get("login") or "?"
-        latest[author] = state
+        latest[_login(r)] = state
 
     states = set(latest.values())
     if "CHANGES_REQUESTED" in states:
@@ -236,7 +253,7 @@ def _review_notes(node: dict) -> tuple[ReviewNote, ...]:
     """
     out: list[ReviewNote] = []
 
-    for r in ((node.get("reviews") or {}).get("nodes") or []):
+    for r in _nodes(node, "reviews"):
         if (r.get("state") or "") not in ("CHANGES_REQUESTED", "COMMENTED"):
             continue
         body = (r.get("body") or "").strip()
@@ -244,17 +261,17 @@ def _review_notes(node: dict) -> tuple[ReviewNote, ...]:
             continue
         out.append(
             ReviewNote(
-                author=(r.get("author") or {}).get("login", "(unknown)"),
+                author=_login(r),
                 state=r.get("state") or "COMMENTED",
                 body=body[:_BODY_LIMIT],
                 url=r.get("url") or "",
             )
         )
 
-    for th in ((node.get("reviewThreads") or {}).get("nodes") or []):
+    for th in _nodes(node, "reviewThreads"):
         if th.get("isResolved"):
             continue
-        comments = (th.get("comments") or {}).get("nodes") or []
+        comments = _nodes(th, "comments")
         if not comments:
             continue
         c = comments[0]
@@ -263,7 +280,7 @@ def _review_notes(node: dict) -> tuple[ReviewNote, ...]:
             continue
         out.append(
             ReviewNote(
-                author=(c.get("author") or {}).get("login", "(unknown)"),
+                author=_login(c),
                 state="INLINE",
                 body=body[:_BODY_LIMIT],
                 path=th.get("path") or "",

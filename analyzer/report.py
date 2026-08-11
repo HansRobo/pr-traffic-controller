@@ -12,10 +12,21 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 from typing import TYPE_CHECKING
 
 from .dag import StackGraph
-from .model import Candidate, Level, PairResult, Relation
+from .model import Candidate, ConflictFile, PairResult, Skip
+
+
+def conflict_file_dict(c: ConflictFile) -> dict:
+    """`ConflictFile` の JSON 表現。ビューアとの契約なので 1 箇所に持つ。
+
+    ベース衝突（`pull_requests[].base_conflict_files`）と逐次マージの
+    衝突（`orders[].presets[].simulation.steps[].conflict_files`）で
+    同じ形を出す。別々に書くと片方だけフィールドが増える。
+    """
+    return {"path": c.path, "stages": sorted(c.stages), "types": list(c.types)}
 
 if TYPE_CHECKING:
     from .gitops import Repo
@@ -102,13 +113,11 @@ def build(
     candidates: dict[str, list[Candidate]],
     pairs: dict[str, list[PairResult]],
     orders: dict,
-    skipped: list[tuple[str, str]],
+    skipped: list[Skip],
     file_changes: dict,
     duration: float,
     repo: "Repo",
 ) -> dict:
-    import datetime as _dt
-
     cand_by_id: dict[str, Candidate] = {
         c.id: c for cands in candidates.values() for c in cands
     }
@@ -210,8 +219,7 @@ def build(
             entry["changed_files"] = sorted(cand.changed_files)
             if cand.base_conflicts:
                 entry["base_conflict_files"] = [
-                    {"path": c.path, "stages": sorted(c.stages), "types": list(c.types)}
-                    for c in cand.base_conflicts
+                    conflict_file_dict(c) for c in cand.base_conflicts
                 ]
             # GitHub の判定とローカル実測の食い違いは、それ自体が
             # 「GitHub の状態がおかしい」という当初の問題の証拠になる
@@ -233,13 +241,13 @@ def build(
             entry["status"] = "excluded"
         prs_out.append(entry)
 
-    for pr_id, reason in skipped:
+    for s in skipped:
         warnings_out.append(
             {
                 "kind": "pr_excluded",
                 "severity": "warn",
-                "subjects": [pr_id],
-                "detail": reason,
+                "subjects": [s.pr_id],
+                "detail": s.reason,
             }
         )
 
@@ -293,11 +301,10 @@ def build(
     # 指定し忘れた統合ラインは、黙って除外すると「衝突 0 件」という
     # 誤った安心を与える。何件がどこにぶら下がっているかを前面に出す。
     unlisted: dict[str, list[str]] = {}
-    for pr_id, reason in skipped:
-        if "含まれていない" not in reason:
+    for s in skipped:
+        if s.kind != "unlisted_line":
             continue
-        branch = reason.split("'")[1] if "'" in reason else "(不明)"
-        unlisted.setdefault(branch, []).append(pr_id)
+        unlisted.setdefault(s.branch, []).append(s.pr_id)
     for branch, ids in sorted(unlisted.items(), key=lambda kv: -len(kv[1])):
         actions.append(
             {
@@ -332,7 +339,7 @@ def build(
                 }
             )
         plan = orders.get(name)
-        sens = getattr(plan, "order_sensitivity", None) if plan else None
+        sens = plan.order_sensitivity if plan else None
         if sens and sens.get("order_invariant"):
             actions.append(
                 {

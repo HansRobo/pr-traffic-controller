@@ -249,7 +249,7 @@ class TestUndetermined:
             Candidate(id="o/r#1", head="a", line="main", landing_tree="t1"),
             Candidate(id="o/r#2", head="b", line="main", landing_tree=None),
         ]
-        return order.plan_line("main", cands, list(pairs), graph)
+        return order.plan_line(cands, list(pairs), graph)
 
     def test_base_conflict_pr_is_not_called_independent(self):
         from analyzer.model import PairResult, Relation
@@ -309,7 +309,7 @@ class TestClusterScope:
             Candidate(id="o/r#2", head="b", line="main", landing_tree="t2",
                       ancestors=frozenset({"o/r#1"})),
         ]
-        plan = order.plan_line("main", cands, [], graph)
+        plan = order.plan_line(cands, [], graph)
         assert plan.clusters == []
         for preset in plan.presets.values():
             o = preset["order"]
@@ -343,7 +343,7 @@ class TestStackOrderInvariant:
             Candidate(id="o/r#4", head="d", line="main", landing_tree="t4"),
         ]
         pairs = [PairResult(a="o/r#3", b="o/r#4", relation=Relation.COMPUTED, level=Level.L2)]
-        plan = order.plan_line("main", cands, pairs, graph)
+        plan = order.plan_line(cands, pairs, graph)
 
         assert [c.members for c in plan.clusters] == [["o/r#3", "o/r#4"]]
         for name, preset in plan.presets.items():

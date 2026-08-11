@@ -10,13 +10,25 @@ from pathlib import Path
 
 import pytest
 
+from analyzer.interference import classify_file, conflict_files_from
 from analyzer.mergetree import InfoMessage, MergeTreeResult, parse
+from analyzer.model import Level
 
 FIXTURES = Path(__file__).parent / "fixtures" / "mergetree"
 
 
 def load(name: str, *, clean: bool) -> MergeTreeResult:
     return parse((FIXTURES / f"{name}.bin").read_bytes(), clean=clean)
+
+
+def levels(result: MergeTreeResult) -> dict[str, Level]:
+    """パース結果を **本番と同じ経路** で等級に落とす。
+
+    `repo=None` で呼べば git を触らずに済む（衝突箇所の中身は取れないが、
+    等級はステージ集合と型だけで決まる）。分類器を 2 つ持たないために、
+    テストもこの経路を通す。
+    """
+    return {cf.path: classify_file(cf) for cf in conflict_files_from(result)}
 
 
 class TestCleanMerges:
@@ -32,7 +44,7 @@ class TestCleanMerges:
         assert r.stages == {}
         assert r.messages == ()
         assert r.conflict_paths == frozenset()
-        assert not r.is_structural()
+        assert levels(r) == {}
 
     def test_clean_landing_tree_pair(self):
         """着地tree同士のクリーンなマージ（同一ファイル・別領域 = L1）。"""
@@ -50,7 +62,7 @@ class TestContentConflicts:
         assert r.conflict_paths == {"shared.py"}
         assert r.stages["shared.py"] == {1, 2, 3}
         # 内容衝突のみなので構造衝突ではない
-        assert not r.is_structural()
+        assert levels(r) == {"shared.py": Level.L2}
 
     def test_auto_merging_records_are_not_conflicts(self):
         """クリーンにマージされたファイルの Auto-merging を衝突と数えない。
@@ -76,7 +88,7 @@ class TestContentConflicts:
         assert not tree.clean
         assert tree.conflict_paths == commit.conflict_paths
         assert tree.stages == commit.stages
-        assert tree.is_structural() == commit.is_structural()
+        assert conflict_files_from(tree) == conflict_files_from(commit)
 
 
 class TestStructuralConflicts:
@@ -89,7 +101,7 @@ class TestStructuralConflicts:
     def test_add_add_has_no_base_stage(self):
         r = load("syn_conflict_add_add", clean=False)
         assert r.stages["new.py"] == {2, 3}, "base(1) が無いのが add/add の印"
-        assert r.is_structural(), "L3 に分類されること"
+        assert levels(r) == {"new.py": Level.L3}
         # 型フィールドだけを見ると内容衝突に見えてしまうことの回帰テスト
         assert r.conflict_types == {"CONFLICT (contents)"}
         assert any("add/add" in m.message for m in r.messages)
@@ -97,19 +109,20 @@ class TestStructuralConflicts:
     def test_modify_delete(self):
         r = load("syn_conflict_modify_delete", clean=False)
         assert r.stages["base.py"] == {1, 3}
-        assert r.is_structural()
+        assert levels(r) == {"base.py": Level.L3}
         assert r.conflict_types == {"CONFLICT (modify/delete)"}
 
     def test_rename_delete(self):
         r = load("syn_conflict_rename_delete", clean=False)
         assert r.stages["renamed.py"] == {1, 3}
-        assert r.is_structural()
+        # 改名元と改名先の両方が衝突パスに出る（情報レコードが両方を挙げる）
+        assert levels(r) == {"base.py": Level.L3, "renamed.py": Level.L3}
         assert r.conflict_types == {"CONFLICT (rename/delete)"}
 
     def test_content_conflict_is_not_structural(self):
         r = load("syn_conflict_content", clean=False)
         assert r.stages["shared.py"] == {1, 2, 3}
-        assert not r.is_structural()
+        assert levels(r) == {"shared.py": Level.L2}
 
 
 class TestParserRobustness:
@@ -167,7 +180,8 @@ class TestParserRobustness:
             InfoMessage(paths=("a.py", "b.py", "c.py"), type="CONFLICT (rename/rename)", message="msg"),
         )
         assert r.conflict_paths == {"a.py", "b.py", "c.py"}
-        assert r.is_structural()
+        # ステージを一切生成しない衝突。型で L3 に拾えること
+        assert levels(r) == {p: Level.L3 for p in ("a.py", "b.py", "c.py")}
 
 
 class TestConflictHunks:

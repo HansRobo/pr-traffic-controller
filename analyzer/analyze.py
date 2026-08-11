@@ -20,7 +20,7 @@ from pathlib import Path
 
 from . import dag, filechanges, github, interference, order, parallel, report, simulate
 from .gitops import GitVersionError, MergeTreeError, Repo, assert_git_version
-from .model import Candidate, PullRequest
+from .model import Candidate, PullRequest, Skip
 
 
 class _Timer:
@@ -317,7 +317,7 @@ def analyze_prepared(prepared: Prepared, *, verbose: bool = True) -> dict:
             名前空間に取り込んである。ここを間違えると、フォーク内の
             枝に載った PR がすべて「解決できない」になる。
             """
-            node_repo, branch = node.split(":", 1)
+            node_repo, branch = dag.split_node(node)
             if node_repo == target:
                 ref = f"origin/{branch}"
             elif node_repo in namespaces:
@@ -386,10 +386,10 @@ def analyze_prepared(prepared: Prepared, *, verbose: bool = True) -> dict:
         if verbose:
             print("着地tree を計算中 ...", file=sys.stderr)
         by_line: dict[str, list[Candidate]] = {name: [] for name in line_names}
-        skipped: list[tuple[str, str]] = []
+        skipped: list[Skip] = []
 
         for node, count in sorted(unlisted_lines.items()):
-            branch = node.split(":", 1)[1]
+            _, branch = dag.split_node(node)
             print(
                 f"  注意: ブランチ '{branch}' に {count} 件の PR が直接ぶら下がっています。"
                 f"統合ラインとして扱うなら --lines に追加してください"
@@ -400,21 +400,28 @@ def analyze_prepared(prepared: Prepared, *, verbose: bool = True) -> dict:
         # PR ごとの着地tree は互いに独立なので並列に作る。**結果を積む順序は
         # PR id 順に固定する**（by_line の並びはペアの列挙順を決めるので、
         # 実行ごとに変わると公開 JSON が揺れる）。
-        def landing(pr_id: str) -> tuple[str, Candidate | None, str]:
+        def landing(pr_id: str) -> tuple[str, Candidate | None, Skip | None]:
             pr = graph.prs[pr_id]
             res = graph.resolutions[pr_id]
             if res.line is None or res.line not in by_line:
-                root_branch = res.root_node.split(":", 1)[1]
+                _, root_branch = dag.split_node(res.root_node)
                 if res.root_node in unlisted_lines:
-                    reason = (
-                        f"'{root_branch}' は指定された統合ラインに含まれていない"
-                        f"（{unlisted_lines[res.root_node]} 件の PR がぶら下がる別の統合先）"
+                    count = unlisted_lines[res.root_node]
+                    skip = Skip(
+                        pr_id=pr_id,
+                        reason=(
+                            f"'{root_branch}' は指定された統合ラインに含まれていない"
+                            f"（{count} 件の PR がぶら下がる別の統合先）"
+                        ),
+                        kind="unlisted_line",
+                        branch=root_branch,
+                        pr_count=count,
                     )
                 else:
-                    reason = f"統合ラインを解決できない ({res.resolution})"
-                return pr_id, None, reason
+                    skip = Skip(pr_id, f"統合ラインを解決できない ({res.resolution})")
+                return pr_id, None, skip
             if not repo.exists(pr.head_oid):
-                return pr_id, None, "head コミットがローカルに存在しない"
+                return pr_id, None, Skip(pr_id, "head コミットがローカルに存在しない")
             try:
                 cand = interference.build_candidate(
                     repo,
@@ -424,12 +431,13 @@ def analyze_prepared(prepared: Prepared, *, verbose: bool = True) -> dict:
                     ancestors=frozenset(res.ancestors),
                 )
             except MergeTreeError as exc:
-                return pr_id, None, f"merge-tree エラー: {exc}"
-            return pr_id, cand, ""
+                return pr_id, None, Skip(pr_id, f"merge-tree エラー: {exc}")
+            return pr_id, cand, None
 
-        for pr_id, cand, reason in parallel.imap(landing, sorted(graph.prs)):
+        for pr_id, cand, skip in parallel.imap(landing, sorted(graph.prs)):
             if cand is None:
-                skipped.append((pr_id, reason))
+                assert skip is not None
+                skipped.append(skip)
             else:
                 by_line[graph.resolutions[pr_id].line].append(cand)
 
@@ -465,7 +473,7 @@ def analyze_prepared(prepared: Prepared, *, verbose: bool = True) -> dict:
         if verbose:
             print("マージ順を計算中 ...", file=sys.stderr)
         orders = {
-            name: order.plan_line(name, by_line[name], results[name], graph)
+            name: order.plan_line(by_line[name], results[name], graph)
             for name in line_names
         }
         timer.split("順序計算")

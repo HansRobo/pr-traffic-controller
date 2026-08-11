@@ -92,18 +92,6 @@ class MergeTreeResult:
     def conflict_types(self) -> frozenset[str]:
         return frozenset(m.type for m in self.messages if m.is_conflict)
 
-    def is_structural(self) -> bool:
-        """構造衝突（L3）か。
-
-        内容衝突は base(1) と双方(2,3) が揃う。ひとつでも欠けるパスが
-        あれば、追加・削除・改名が絡む構造的な衝突である。
-        """
-        for st in self.stages.values():
-            if st != frozenset({1, 2, 3}):
-                return True
-        # ステージを生成しない構造衝突は型で拾う（内容衝突以外はすべて構造扱い）
-        return any(t != "CONFLICT (contents)" for t in self.conflict_types)
-
 
 def parse(data: bytes, *, clean: bool) -> MergeTreeResult:
     """`-z` 出力をパースする。
