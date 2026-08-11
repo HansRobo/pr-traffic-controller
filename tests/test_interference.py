@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from analyzer import interference
-from analyzer.gitops import MIN_GIT_VERSION, Repo, git_version
+from analyzer.gitops import Repo, assert_git_version
 from analyzer.model import Level, Relation, WarningKind
 
 from .repofixture import build
@@ -19,17 +19,22 @@ pytestmark = pytest.mark.requires_git
 
 
 def _git_too_old() -> bool:
+    """バージョン規則は本番が持つ。ここで比較式を写すと 2 か所になる。
+
+    `GitVersionError` 以外（git が無い・実行できない等）も skip 扱いにする。
+    """
     try:
-        return git_version()[:2] < MIN_GIT_VERSION
+        assert_git_version()
     except Exception:
         return True
-
-
-pytest.mark.skipif(_git_too_old(), reason="git >= 2.40 が必要")
+    return False
 
 
 @pytest.fixture(scope="module")
 def repo(tmp_path_factory) -> Repo:
+    # skip を効かせているのはここ 1 か所だけ。モジュール冒頭に
+    # `pytest.mark.skipif(...)` を式文として置いても、MarkDecorator を作って
+    # 捨てるだけで何も起きない（実際そうなっていたので削除した）。
     if _git_too_old():
         pytest.skip("git >= 2.40 が必要")
     root = tmp_path_factory.mktemp("fixture-repo")
@@ -42,8 +47,30 @@ def line(repo: Repo) -> str:
     return repo.rev_parse("main")
 
 
+#: 構築済み候補のキャッシュ。`repo` は module スコープで一度だけ作られ、
+#: テスト中は一切書き換わらないので、同じ (branch, kw) は必ず同じ候補になる。
+#:
+#: 素で作り直すと `build_candidate` が候補ごとに最低 3 本 git を起こす
+#: （`rev_parse` / `merge_base` / `changed_files` はメモ化されていない）。
+#: 実際の呼び出しは 53 回あるがユニークなのは 22 通りで、9 割方が重複だった。
+_CAND_CACHE: dict = {}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _clear_cand_cache():
+    """モジュールごとに捨てる。`repo` の寿命と一致させるため。"""
+    _CAND_CACHE.clear()
+    yield
+    _CAND_CACHE.clear()
+
+
 def cand(repo: Repo, line: str, branch: str, **kw):
-    return interference.build_candidate(repo, line, branch, repo.rev_parse(branch), **kw)
+    key = (line, branch, tuple(sorted(kw.items())))
+    if key not in _CAND_CACHE:
+        _CAND_CACHE[key] = interference.build_candidate(
+            repo, line, branch, repo.rev_parse(branch), **kw
+        )
+    return _CAND_CACHE[key]
 
 
 def pair(repo: Repo, line: str, a: str, b: str):
@@ -145,7 +172,12 @@ class TestSemanticWarnings:
 
 
 class TestLandingTrees:
-    def test_landing_tree_merges_change_into_line(self, repo, line):
+    def test_landing_tree_is_created_without_base_conflict(self, repo, line):
+        """着地tree が作れて、触ったファイルが拾えること。
+
+        「変更がラインにマージされている」ことまでは見ていない
+        （それを見るのは下の `test_l1_merge_keeps_both_changes`）。
+        """
         c = cand(repo, line, "b")
         assert c.landing_tree
         assert not c.has_base_conflict

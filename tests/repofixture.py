@@ -61,16 +61,14 @@ class RepoFixture:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
 
-    def commit(self, message: str) -> str:
+    def commit(self, message: str) -> None:
+        # OID は誰も使わないので `rev-parse` は呼ばない。
+        # コミットは 22 回あり、そのぶん丸ごと git 起動が減る。
         self.git("add", "-A")
         self.git("commit", "--no-gpg-sign", "-q", "-m", message)
-        return self.git("rev-parse", "HEAD").strip()
 
     def branch_from(self, name: str, start: str = "main") -> None:
         self.git("checkout", "-q", "-b", name, start)
-
-    def rev(self, ref: str) -> str:
-        return self.git("rev-parse", ref).strip()
 
 
 def build(root: Path) -> RepoFixture:
@@ -91,6 +89,19 @@ def build(root: Path) -> RepoFixture:
       l  : head_fn の 3 行目を変更
       m  : requirements.txt の先頭を変更 -> n と L1 + DEPENDENCY_OR_CONFIG_OVERLAP
       n  : requirements.txt の末尾を変更
+      o  : commented.py のコメント行を変更 -> p と L2 だが中身はコメントだけ
+      p  : commented.py の同じコメント行を別内容に
+      q  : notes.md を追加             -> s と L2（文書ファイルのみの衝突）
+      s  : notes.md を別内容で追加
+      u  : shared.py と base.py の両方の先頭を変更 -> v と「一方は自動マージ、
+           もう一方は衝突」の混在（merge-tree の情報節に Auto-merging と
+           CONFLICT が同居する出力を作るため）
+      v  : shared.py の先頭（u と衝突）+ base.py の末尾（自動マージ）
+      w  : commented.py の「コード + 末尾コメント」行を変更 -> x と L2。
+           行にコードが含まれるのでコメントだけとは見なさない
+      x  : commented.py の同じ行を別内容に
+
+    j / r / t は欠番（紛らわしい 1 文字を避けたため）。
     """
     root.mkdir(parents=True, exist_ok=True)
     r = RepoFixture(root)
