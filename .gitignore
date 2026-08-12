@@ -2,4 +2,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+*.egg-info/
 standalone.html
+# 解析結果はローカル実行の産物。正は Actions のキャッシュ側にある。
+docs/data/*.json

@@ -52,27 +52,54 @@
 
 ### ローカル
 
-`gh` の認証（`gh auth login`）と **git 2.40 以上**が必要。
+clone したら 1 コマンドでサイトが見られる。必要なのは **docker** と
+**`gh` の認証**（`gh auth login`）だけ。Python の依存は無い（stdlib のみ）。
+
+```bash
+./serve.sh OWNER/NAME        # ビルド → 解析 → http://localhost:8000 で配信
+```
+
+`OWNER/NAME` は**解析したいリポジトリ**（このリポジトリではない）。
+
+解析には **git 2.40 以上**が必要だが、`serve.sh` は docker 越しに走らせるので
+ホストの git が古くても動く（`merge-tree --write-tree -z` を使うため）。
+
+```bash
+./serve.sh OWNER/NAME --lines main,release  # 統合ラインを明示する
+./serve.sh                                  # 既存の解析結果をそのまま配信
+./serve.sh --refresh                        # 蓄積を全件更新して配信
+```
+
+`--lines` を省くと既定ブランチを `gh` に問い合わせて使う。`PORT=9000` で
+待ち受けポートを、`NO_OPEN=1` でブラウザの自動起動を抑えられる。
+
+個別に叩く場合は compose を直接使う:
+
+```bash
+docker compose build                       # 初回のみ。更新は --pull を付ける
+GH_TOKEN="$(gh auth token)" docker compose run --rm analyze \
+  --repo OWNER/NAME --lines main
+docker compose run --rm analyze --forget OWNER/NAME   # 蓄積から外す
+docker compose up viewer                              # http://localhost:8000
+```
+
+出力先は既定で `docs/data`。`--out` を指定すると、蓄積を汚さず結果だけ書き出せる。
+単一 HTML にまとめる場合は `python3 tools/build_standalone.py out.html`。
+
+`viewer` だけ `up` を使う。`run` はポートを公開しない（`--service-ports` が要る）。
+コンテナはホストの uid で走るので、解析結果が root 所有で残ることはない。
+uid が 1000 でない環境では `export DOCKER_UID=$(id -u) DOCKER_GID=$(id -g)` してから叩く
+（`serve.sh` と `run-tests-docker.sh` はこれを内部で済ませている）。
+
+**private リポジトリは対象外。** PR の取得は `gh`（`GH_TOKEN`）を通すが、ref の
+fetch は `https://github.com/OWNER/NAME.git` へ資格情報なしで行うため、public
+リポジトリしか解析できない。
+
+git 2.40 以上のホストなら compose を挟まず直接でもよい:
 
 ```bash
 python -m analyzer.analyze --repo OWNER/NAME --lines main --outdir docs/data
-python -m analyzer.analyze --refresh --outdir docs/data          # 蓄積を全件更新
-python -m analyzer.analyze --forget OWNER/NAME --outdir docs/data # 蓄積から外す
-
 python -m http.server -d docs 8000
-```
-
-`--out` を指定すると、蓄積を汚さず結果だけ書き出せる。
-単一 HTML にまとめる場合は `python3 tools/build_standalone.py out.html`。
-
-git が古い環境では docker を使う:
-
-```bash
-docker run --rm --entrypoint sh -e GH_TOKEN="$(gh auth token)" \
-  -v "$PWD":/w -w /w alpine/git:latest -c '
-    apk add --quiet python3 github-cli
-    git config --global --add safe.directory "*"
-    python3 -m analyzer.analyze --repo OWNER/NAME --lines main --outdir /w/docs/data'
 ```
 
 ## 仕組み
@@ -121,10 +148,27 @@ GraphQL クエリを並列化してある。複数リポジトリを更新する
 ## 開発
 
 ```bash
+python3 -m venv .venv && .venv/bin/pip install pytest   # 初回のみ
 ./run-tests.sh          # git 不要な層（どの環境でも走る）
+
 ./run-tests-docker.sh   # 全テスト（git >= 2.40 が要るので docker）
-node tools/smoke.mjs    # ビューアの全ビューを実データに対して描画
+node tools/smoke.mjs    # ビューアの全ビューを実データに対して描画（解析後）
 ```
+
+実行時依存は 0（stdlib のみ）なので `pytest` だけで足りる。import は pytest の
+rootdir 挿入で解決するので editable install も要らない（CI も同じ形）。
+
+`run-tests-docker.sh` の実体は `docker compose run --rm test`（`DOCKER_UID`/
+`DOCKER_GID` を埋めるだけの委譲）。直接叩けば pytest の引数もそのまま渡る:
+
+```bash
+docker compose run --rm test -m requires_git   # 実 git を使う層だけ
+docker compose run --rm test -k mergetree
+```
+
+イメージのベースは `alpine/git` から変えないこと。CI が git のバージョン差で
+出力形式が変わっていないかを 2 レグで見ており、これはその alpine 側の再現である
+（理由は `Dockerfile` のコメント）。
 
 テストは 3 層に分かれ、git のバージョン依存を最下層だけに閉じ込めてある。
 

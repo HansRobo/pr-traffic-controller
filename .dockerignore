@@ -1,0 +1,9 @@
+# Dockerfile に COPY は無いが、ビルドコンテキストは毎回転送される。
+# .venv (36M) と .git (3.3M) を外すと実質ゼロになる。
+.git/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+docs/data/*.json
+standalone.html

@@ -1,0 +1,51 @@
+# ローカル開発の入口。解析は git >= 2.40 を要求するが、ホストの git が
+# 古くてもここを通せば動く。テスト・解析・ビューアの 3 つを揃えてある。
+#
+#   docker compose run --rm test                      # 全テスト
+#   docker compose run --rm test -m requires_git      # 実 git を使う層だけ
+#   GH_TOKEN="$(gh auth token)" \
+#     docker compose run --rm analyze --repo OWNER/NAME --lines main
+#   docker compose up viewer                          # http://localhost:8000
+#
+# 解析から配信まで一息にやるなら ./serve.sh OWNER/NAME（この 3 つを束ねたもの）。
+# viewer だけ up を使う。run はポートを公開しない（--service-ports が要る）。
+
+x-base: &base
+  build: .
+  # 3 サービスで同じイメージを共有し、ビルドを 1 回に留める。
+  image: pr-traffic-controller-dev
+  # bind mount に root 所有のファイルを残さないため、ホストの uid で走らせる。
+  # compose は $UID を見ない（bash のシェル変数で export されていない）ので、
+  # 独自の DOCKER_UID/DOCKER_GID を使う。既定の 1000 で合わない環境では
+  # `export DOCKER_UID=$(id -u) DOCKER_GID=$(id -g)` してから叩くこと。
+  user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
+  volumes:
+    - .:/w
+  working_dir: /w
+  # PID 1 にはシグナルの既定動作が適用されない。init を挟まないと
+  # http.server も解析中の python も SIGTERM を無視し、停止のたびに
+  # 10 秒待たされてから SIGKILL される。
+  init: true
+
+services:
+  # 固定部は command ではなく entrypoint に置く。`compose run SVC ARGS` は
+  # command を丸ごと置換するので、command 側に書くと引数を足せなくなる。
+  test:
+    <<: *base
+    entrypoint: ["python3", "-m", "pytest", "-p", "no:cacheprovider"]
+
+  analyze:
+    <<: *base
+    entrypoint: ["python3", "-m", "analyzer.analyze"]
+    environment:
+      # gh の認証はトークンで渡す。private リポジトリは対象外
+      # （fetch は資格情報なしの https で行うため）。
+      GH_TOKEN: "${GH_TOKEN:-}"
+      PR_CONFLICT_JOBS: "${PR_CONFLICT_JOBS:-}"
+
+  viewer:
+    <<: *base
+    entrypoint: ["python3", "-m", "http.server", "-d", "docs"]
+    command: ["8000"]
+    ports:
+      - "${PORT:-8000}:8000"
